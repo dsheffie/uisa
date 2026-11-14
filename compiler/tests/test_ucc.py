@@ -8,7 +8,7 @@ t_*.c    run-time tests: compiled by ucc, assembled by tools/uisa.py and run on
 err_*.c  must fail to compile; the first line is `// expect: <text>` and the
          diagnostic must contain <text>.
 
-usage: test_ucc.py [iterations]
+usage: test_ucc.py [iterations [name-substring]]
 """
 
 import glob
@@ -48,11 +48,12 @@ def gen_relax():
 
 def main():
     iters = sys.argv[1] if len(sys.argv) > 1 else "3000"
+    only = sys.argv[2] if len(sys.argv) > 2 else ""
     os.makedirs(OUT, exist_ok=True)
     spec = uisa.load()
     fails = 0
 
-    for src in sorted(glob.glob(os.path.join(HERE, "err_*.c"))):
+    for src in sorted(glob.glob(os.path.join(HERE, "err_*.c"))) if not only else []:
         with open(src) as f:
             first = f.readline()
         m = re.match(r"//\s*expect:\s*(.*)", first)
@@ -66,6 +67,7 @@ def main():
             print("ucc error  %-14s ok: %s" % (name, p.stderr.strip().splitlines()[0]))
 
     srcs = sorted(glob.glob(os.path.join(HERE, "t_*.c"))) + [gen_relax()]
+    srcs = [x for x in srcs if only in os.path.basename(x)]
     inc = []
     table = []
     for src in srcs:

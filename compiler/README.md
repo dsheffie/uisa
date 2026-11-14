@@ -16,13 +16,14 @@ once with z3.
 
 ```
 make compiler                       # CMake build into build/compiler (needs flex, bison 3, z3, python3 + PyYAML)
-build/compiler/ucc [-o out.s] [-v] [--dump-tac] [--timeout ms] file.c
-python3 compiler/tests/test_ucc.py  # compiler tests (also run by `make`)
+build/compiler/ucc [-o out.s] [-v] [--dump-tac] [--rlimit n] file.c
+python3 compiler/tests/test_ucc.py [iterations [name]]  # compiler tests (also run by `make`)
 ```
 
 z3 is found under `/opt/local` (MacPorts: `sudo port install z3`),
 `/opt/homebrew` or `/usr/local`. `-v` prints the size of the allocation
-problem and the move cost z3 reached.
+problem, the move cost z3 reached, the greedy allocation's cost and the z3
+resource units used.
 
 Millicode written in C lives in `millicode/*.c`. When a `.c` file is listed in
 `millicode/dispatch.yaml`, `tools/gen_millicode.py` compiles it to
@@ -70,7 +71,7 @@ ever see 32-bit values and each word is allocated, and dies, on its own.
 | `* ` | `mul` + `mulhu` + two cross `mul`s; `(u64)a * b` with 32-bit operands is `mul` + `mulhu` |
 | `<< >>` constant | two or three word shifts |
 | `<< >>` variable | branch-free, 14 instructions; the count is taken mod 64 |
-| `/ %` | an inline 64-iteration shift-subtract loop, with a `divu`/`remu` fast path when both high words are 0; signed divides the magnitudes. Unsigned powers of two become shifts and masks. Division by zero is undefined, as in C |
+| `/ %` | inline, no loop over bits (Hacker's Delight `divdu`/`divlu`): both high words 0 is one `divu`/`remu`; a 32-bit divisor is one `divu` for the high word plus a 64/32 step that estimates two 16-bit quotient digits with `divu` and corrects each at most twice; a wider divisor is normalized with `clz`, the same 64/32 step estimates the 32-bit quotient, and one multiply-subtract fixes it. Both paths share one copy of the 64/32 step; a divisor known to fit 32 bits (`u64 / u32`) emits only that path. About 110 instructions per division site, 25-60 executed. Signed divides the magnitudes. Unsigned powers of two become shifts and masks. Division by zero is undefined, as in C |
 | comparisons | as branches: high words first, then the low words unsigned; as values: `slt`/`sltu` on the high words, combined |
 | calls | a 64-bit argument takes two parameter registers (low word first); a 64-bit result comes back in two return registers, read by `Call` + `CallRes` and copied out as one parallel copy |
 
@@ -136,6 +137,16 @@ which the compiler emits itself) and `lui/auipc` is available as
   a register. Each function's parameter and return registers are part of the
   solution, so there is no fixed calling convention and no caller/callee-saved
   split. The result is verified independently of z3 before emission.
+- **Greedy start, deterministic budget.** Before z3 runs, a greedy allocator
+  colors functions callees first and values in dominance order (chordal
+  coloring), each value taking a register its colored preference partners
+  use, then improves single values locally. z3 starts from that solution
+  and has a resource budget (`--rlimit`, default 30M, roughly 25 s), not a
+  wall-clock timeout, so the same source always gives the same millicode.
+  When the budget runs out the greedy solution is used. z3 proves optimal
+  allocations up to about 650 values (`t_u64div`, 8 s); beyond that, expect
+  the greedy result (`t_u64div2`: 556 values, weighted move cost 270 of
+  3139).
 - **Out of SSA.** Critical edges are split; phis become parallel copies on
   the incoming edge, cycles are broken with three-xor swaps (no scratch
   register).
@@ -161,9 +172,9 @@ which the compiler emits itself) and `lui/auipc` is available as
 
 ## Not done yet
 
-- **64-bit polish.** `u64 / u32` and 128-bit helpers (`mul64To128`,
-  `estimateDiv128To64`) go through the general 64-bit loop; a
-  divide-by-32-bit-divisor path (two `divu` steps) would be much faster.
+- **Allocation at SoftFloat scale.** z3 stops proving optimality around
+  600-700 values. Splitting the problem (per function with callees fixed),
+  pre-coalescing safe copies, or symmetry breaking would let it go further.
 - **Scratch memory.** Explicit hidden-memory storage (`scratch_base`) for
   state larger than the register file; no syntax for it yet.
 - **The SoftFloat milestone.** 80-bit extended precision for the 68040 FPU is

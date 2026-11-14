@@ -305,58 +305,157 @@ static EV shift64(CG &cg, Op op, EV a, Operand n) {
 static void br64(CG &cg, Cond c, EV a, EV b, BasicBlock *t, BasicBlock *f);
 static Cond unsignedCond(Cond c);
 
-// Unsigned 64-bit division: quotient and remainder.
+static Operand intrin(CG &cg, const char *name, std::vector<Operand> args) {
+  const IntrinsicDesc *d = findIntrinsic(name);
+  if (!d) fatal(cg.line, "internal: the ISA has no %s", name);
+  Instr *i = new Instr(Op::Intrin);
+  i->in = d;
+  i->dst = cg.temp();
+  i->a = std::move(args);
+  cg.emit(i);
+  return Operand::reg(i->dst);
+}
+
+// (u1:u0) / v for u1 < v: a 32-bit quotient and remainder (Hacker's Delight
+// divlu, Knuth's algorithm D with 16-bit digits). v is normalized so its top
+// bit is set; each quotient digit is estimated with one divu by the top half
+// of v and corrected at most twice.
+static void divlu(CG &cg, Operand u1, Operand u0, Operand v, Operand *q, Operand *r) {
+  const Operand B = Operand::cst(0x10000), M = Operand::cst(0xffff), K16 = Operand::cst(16);
+  Operand s = intrin(cg, "__clz", {v});
+  Operand vn = W(cg, Op::Shl, v, s);
+  Operand vn1 = W(cg, Op::Shr, vn, K16), vn0 = W(cg, Op::And, vn, M);
+  // u >> (32 - s) without the s = 0 problem, as in shift64
+  Operand un32 = W(cg, Op::Or, W(cg, Op::Shl, u1, s),
+                   W(cg, Op::Shr, W(cg, Op::Shr, u0, Operand::cst(1)), W(cg, Op::Xor, s, Operand::cst(31))));
+  Operand un10 = W(cg, Op::Shl, u0, s);
+  Operand un1 = W(cg, Op::Shr, un10, K16), un0 = W(cg, Op::And, un10, M);
+  // one quotient digit of (top / vn), with un the next dividend digit
+  auto digit = [&](Operand top, Operand un, const char *nm) {
+    Reg *qd = cg.var(nm), *rhat = cg.var("rhat");
+    cg.copy(qd, W(cg, Op::DivU, top, vn1));
+    cg.copy(rhat, W(cg, Op::Sub, top, W(cg, Op::Mul, Operand::reg(qd), vn1)));
+    BasicBlock *L = cg.block("qtest"), *C = cg.block("qtest2"), *F = cg.block("qfix"), *D = cg.block("qok");
+    cg.jmp(L);
+    cg.cur = L;
+    cg.br(Cond::GEU, Operand::reg(qd), B, F, C);
+    cg.cur = C;
+    cg.br(Cond::GTU, W(cg, Op::Mul, Operand::reg(qd), vn0),
+          W(cg, Op::Add, W(cg, Op::Shl, Operand::reg(rhat), K16), un), F, D);
+    cg.cur = F;
+    cg.copy(qd, W(cg, Op::Add, Operand::reg(qd), Operand::cst(-1)));
+    cg.copy(rhat, W(cg, Op::Add, Operand::reg(rhat), vn1));
+    cg.br(Cond::LTU, Operand::reg(rhat), B, L, D);
+    cg.cur = D;
+    // the partial remainder: top * b + un - digit * vn
+    return std::make_pair(Operand::reg(qd),
+                          W(cg, Op::Sub, W(cg, Op::Add, W(cg, Op::Shl, top, K16), un), W(cg, Op::Mul, Operand::reg(qd), vn)));
+  };
+  auto d1 = digit(un32, un1, "q1");
+  auto d0 = digit(d1.second, un0, "q0");
+  *q = W(cg, Op::Or, W(cg, Op::Shl, d1.first, K16), d0.first);
+  *r = W(cg, Op::Shr, d0.second, s);
+}
+
+// Unsigned 64-bit division: quotient and remainder, without a bit loop
+// (Hacker's Delight divdu). A divisor that fits 32 bits takes one divu for
+// the high word and divlu for the rest; a wider divisor is normalized with
+// clz, divlu on the shifted dividend estimates the (32-bit) quotient, and one
+// multiply-subtract corrects it. Both paths share one copy of divlu.
 static void udivmod64(CG &cg, EV n, EV d, EV *q, EV *r) {
   Type u = Type(64, false);
-  bool small = n.hi.isImm() && n.hi.imm == 0 && d.hi.isImm() && d.hi.imm == 0;
-  if (small) {
+  bool dSmall = d.hi.isImm() && d.hi.imm == 0;    // known at compile time
+  bool dWide = d.hi.isImm() && d.hi.imm != 0;
+  if (dSmall && n.hi.isImm() && n.hi.imm == 0) {
     *q = pair(W(cg, Op::DivU, n.op, d.op), Operand::cst(0), u);
     *r = pair(W(cg, Op::RemU, n.op, d.op), Operand::cst(0), u);
     return;
   }
   Reg *ql = cg.var("q"), *qh = cg.var("q.hi"), *rl = cg.var("r"), *rh = cg.var("r.hi");
-  BasicBlock *fast = cg.block("div32"), *slow = cg.block("div64"), *J = cg.block("divend");
-  cg.br(Cond::EQ, W(cg, Op::Or, n.hi, d.hi), Operand::cst(0), fast, slow);
-  cg.cur = fast;
-  cg.copy(ql, W(cg, Op::DivU, n.op, d.op));
-  cg.copy(qh, Operand::cst(0));
-  cg.copy(rl, W(cg, Op::RemU, n.op, d.op));
-  cg.copy(rh, Operand::cst(0));
-  cg.jmp(J);
-  // restoring shift-subtract: the dividend shifts left through the
-  // remainder and the quotient bits shift in behind it
-  cg.cur = slow;
-  Reg *i = cg.var("i");
-  cg.copy(ql, n.op);
-  cg.copy(qh, n.hi);
-  cg.copy(rl, Operand::cst(0));
-  cg.copy(rh, Operand::cst(0));
-  cg.copy(i, Operand::cst(64));
-  BasicBlock *L = cg.block("divloop"), *Sub = cg.block("divsub"), *C = cg.block("divnext");
-  cg.jmp(L);
-  cg.cur = L;
-  Operand QL = Operand::reg(ql), QH = Operand::reg(qh), RL = Operand::reg(rl), RH = Operand::reg(rh);
-  Operand nrh = W(cg, Op::Or, W(cg, Op::Shl, RH, Operand::cst(1)), W(cg, Op::Shr, RL, Operand::cst(31)));
-  Operand nrl = W(cg, Op::Or, W(cg, Op::Shl, RL, Operand::cst(1)), W(cg, Op::Shr, QH, Operand::cst(31)));
-  Operand nqh = W(cg, Op::Or, W(cg, Op::Shl, QH, Operand::cst(1)), W(cg, Op::Shr, QL, Operand::cst(31)));
-  Operand nql = W(cg, Op::Shl, QL, Operand::cst(1));
-  cg.copy(rh, nrh);
-  cg.copy(rl, nrl);
-  cg.copy(qh, nqh);
-  cg.copy(ql, nql);
-  br64(cg, Cond::GEU, pair(RL, RH, u), d, Sub, C);
-  cg.cur = Sub;
-  EV nr = sub64(cg, pair(RL, RH, u), d);
-  cg.copy(rl, nr.op);
-  cg.copy(rh, nr.hi);
-  cg.copy(ql, W(cg, Op::Or, QL, Operand::cst(1)));
-  cg.jmp(C);
-  cg.cur = C;
-  cg.copy(i, W(cg, Op::Add, Operand::reg(i), Operand::cst(-1)));
-  cg.br(Cond::NE, Operand::reg(i), Operand::cst(0), L, J);
+  // divlu's inputs and what each path needs after it
+  Reg *x1 = cg.var("x1"), *x0 = cg.var("x0"), *xv = cg.var("xv"), *wide = cg.var("wide");
+  Reg *qtop = cg.var("qtop"), *sh = cg.var("sh");
+  BasicBlock *J = cg.block("divend"), *D = cg.block("divlu");
+  BasicBlock *narrow = dWide ? nullptr : cg.block("div64by32");
+  BasicBlock *big = dSmall ? nullptr : cg.block("div64by64");
+  if (!dSmall && !dWide) cg.br(Cond::NE, d.hi, Operand::cst(0), big, narrow);
+  else cg.jmp(dSmall ? narrow : big);
+  if (narrow) {
+    cg.cur = narrow;
+    BasicBlock *fast = cg.block("div32"), *two = cg.block("div2step");
+    cg.br(Cond::EQ, n.hi, Operand::cst(0), fast, two);
+    cg.cur = fast;
+    cg.copy(ql, W(cg, Op::DivU, n.op, d.op));
+    cg.copy(qh, Operand::cst(0));
+    cg.copy(rl, W(cg, Op::RemU, n.op, d.op));
+    cg.copy(rh, Operand::cst(0));
+    cg.jmp(J);
+    cg.cur = two;
+    cg.copy(qtop, W(cg, Op::DivU, n.hi, d.op));
+    cg.copy(x1, W(cg, Op::RemU, n.hi, d.op));
+    cg.copy(x0, n.op);
+    cg.copy(xv, d.op);
+    cg.copy(wide, Operand::cst(0));
+    cg.copy(sh, Operand::cst(0));
+    cg.jmp(D);
+  }
+  if (big) {
+    cg.cur = big;
+    Operand s = intrin(cg, "__clz", {d.hi});
+    EV dn = shift64(cg, Op::Shl, d, s);            // top bit of the high word set
+    EV n1 = shift64(cg, Op::Shr, n, Operand::cst(1));
+    cg.copy(sh, s);
+    cg.copy(x1, n1.hi);
+    cg.copy(x0, n1.op);
+    cg.copy(xv, dn.hi);
+    cg.copy(wide, Operand::cst(1));
+    cg.copy(qtop, Operand::cst(0));
+    cg.jmp(D);
+  }
+  cg.cur = D;
+  Operand dq, dr;
+  divlu(cg, Operand::reg(x1), Operand::reg(x0), Operand::reg(xv), &dq, &dr);
+  BasicBlock *post32 = narrow ? cg.block("div2done") : nullptr, *post64 = big ? cg.block("div64done") : nullptr;
+  if (narrow && big) cg.br(Cond::EQ, Operand::reg(wide), Operand::cst(0), post32, post64);
+  else cg.jmp(narrow ? post32 : post64);
+  if (post32) {
+    cg.cur = post32;
+    cg.copy(ql, dq);
+    cg.copy(qh, Operand::reg(qtop));
+    cg.copy(rl, dr);
+    cg.copy(rh, Operand::cst(0));
+    cg.jmp(J);
+  }
+  if (post64) {
+    cg.cur = post64;
+    // q0 = (dq << sh) >> 31, at most one too big: back off by one, then the
+    // remainder tells whether that was one too small
+    Operand q0 = W(cg, Op::Shr, dq, W(cg, Op::Xor, Operand::reg(sh), Operand::cst(31)));
+    q0 = W(cg, Op::Sub, q0, S(cg, Cond::NE, q0, Operand::cst(0)));
+    EV prod = pair(W(cg, Op::Mul, q0, d.op), W(cg, Op::Add, mulhu(cg, q0, d.op), W(cg, Op::Mul, q0, d.hi)), u);
+    EV rem = sub64(cg, n, prod);
+    Reg *qq = cg.var("q0"), *r0 = cg.var("r0"), *r1 = cg.var("r0.hi");
+    cg.copy(qq, q0);
+    cg.copy(r0, rem.op);
+    cg.copy(r1, rem.hi);
+    BasicBlock *fix = cg.block("divfix"), *done = cg.block("divfixed");
+    br64(cg, Cond::GEU, rem, d, fix, done);
+    cg.cur = fix;
+    cg.copy(qq, W(cg, Op::Add, Operand::reg(qq), Operand::cst(1)));
+    EV r2 = sub64(cg, rem, d);
+    cg.copy(r0, r2.op);
+    cg.copy(r1, r2.hi);
+    cg.jmp(done);
+    cg.cur = done;
+    cg.copy(ql, Operand::reg(qq));
+    cg.copy(qh, Operand::cst(0));
+    cg.copy(rl, Operand::reg(r0));
+    cg.copy(rh, Operand::reg(r1));
+    cg.jmp(J);
+  }
   cg.cur = J;
-  *q = pair(QL, QH, u);
-  *r = pair(RL, RH, u);
+  *q = pair(Operand::reg(ql), Operand::reg(qh), u);
+  *r = pair(Operand::reg(rl), Operand::reg(rh), u);
 }
 
 static bool foldBin64(int op, bool sign, uint64_t a, uint64_t b, uint64_t *r, int line) {
@@ -542,7 +641,15 @@ static EV symValue(Sym *s) {
   return EV{Operand::reg(s->var), s->ty};
 }
 // Assign a value already converted to the variable's type.
-static void assignSym(CG &cg, Sym *s, const EV &v) {
+// The two words are copied one after the other, so a word that still names
+// the other target variable (d = d << 32 makes the new high word the old low
+// variable) is read into a temporary first.
+static void assignSym(CG &cg, Sym *s, EV v) {
+  if (s->ty.is64() && v.hi.isReg() && v.hi.r == s->var) {
+    Reg *t = cg.temp();
+    cg.copy(t, v.hi);
+    v.hi = Operand::reg(t);
+  }
   cg.copy(s->var, v.op);
   if (s->ty.is64()) cg.copy(s->varHi, v.hi);
 }

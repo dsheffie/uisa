@@ -33,7 +33,7 @@ void buildAllocProblem(Program *p, AllocProblem &ap);
 // Check register pressure against the register file; hard errors, no spilling.
 void checkPressure(Program *p, AllocProblem &ap);
 // Assign Reg::color for every value (regalloc.cpp, z3).
-void allocateRegisters(Program *p, AllocProblem &ap, int timeoutMs, bool verbose);
+void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbose);
 // Check that coloring satisfies every constraint (independent of the solver).
 void verifyAllocation(Program *p, AllocProblem &ap);
 // Emit uisa assembly text.

@@ -79,6 +79,11 @@ entry void t_u64(void) {
   __wrg(A3, (u32)(lo >> 32) ^ (u32)lo);
   __wrg(A4, (u32)big ^ (u32)(big >> 32));
   __wrg(A5, (u32)get64(D6) + (u32)(get64(D6) >> 32));
+  // a word of the new value that is still the other word's old variable
+  u64 w = a;
+  if (n & 1) w = (w << 32) | 0xffffffff;
+  if (n & 2) w = (w >> 32) | 0xabcd00000000ull;
+  __wrg(A6, (u32)w + (u32)(w >> 32) * 7);
   __wrg(GPC, __next_pc());
   __gexit();
 }
