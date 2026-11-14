@@ -448,6 +448,16 @@ static bool simplify(Function *f) {
           else if (k == 0 && (i->op == Op::Mul || i->op == Op::And)) { toCopy(i, Operand::cst(0)); changed = true; }
           else if (k == 1 && (i->op == Op::Mul || i->op == Op::Div || i->op == Op::DivU)) { toCopy(i, a[0]); changed = true; }
           else if (k == -1 && i->op == Op::And) { toCopy(i, a[0]); changed = true; }
+          else if (k > 1 && (k & (k - 1)) == 0 && (i->op == Op::Mul || i->op == Op::DivU || i->op == Op::RemU)) {
+            int sh = __builtin_ctz((uint32_t)k);   // power of two: shift or mask
+            if (i->op == Op::RemU) { i->op = Op::And; a[1].imm = k - 1; }
+            else { i->op = i->op == Op::Mul ? Op::Shl : Op::Shr; a[1].imm = sh; }
+            changed = true;
+          } else if (i->op == Op::And && (k == 0xffff || k == 0xff)) {
+            i->op = k == 0xff ? Op::Zext8 : Op::Zext16;
+            a.pop_back();
+            changed = true;
+          }
           break;
         }
         case Op::Set:
@@ -499,7 +509,14 @@ static bool copyPropagate(Function *f) {
   std::map<Reg *, Operand> repl;
   for (BasicBlock *b : f->blocks)
     for (Instr *i : b->ins)
-      if (i->op == Op::Copy && i->dst && (i->a[0].isReg() || i->a[0].isImm())) repl[i->dst] = i->a[0];
+      if (i->op == Op::Copy && i->dst && (i->a[0].isReg() || i->a[0].isImm())) {
+        repl[i->dst] = i->a[0];
+        // a temporary that now stands for a variable takes its name (diagnostics, listings)
+        Reg *src = i->a[0].isReg() ? i->a[0].r : nullptr;
+        if (src && i->dst->var && i->dst->var->isVar && !(src->var && src->var->isVar) && src->precolor < 0) {
+          src->name = i->dst->name;
+        }
+      }
   if (repl.empty()) return false;
   auto resolve = [&](Operand o) {
     for (int n = 0; o.isReg() && repl.count(o.r) && n < 1000; n++) o = repl[o.r];

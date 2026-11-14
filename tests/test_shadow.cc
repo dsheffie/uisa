@@ -123,6 +123,50 @@ int main() {
     t.pre.r[8] = 0x2000; t.post.r[8] = 0x2000; t.post.r[3] = 0xfff; t.post.sr = 0x2708;
     run(t);
   }
+  // --- bitfield millicode (compiled from millicode/bitfield.c) ---
+  {  // BFEXTS D1{4:8},D2: sign-extends, N set
+    Insn t{"bfexts d1{4:8},d2", 0xebc1, st(0xd10, 0x2700), st(0xd14, 0x2708), {{UISA_LOG_IFETCH, 2, 0xd12, 0x2108}}, 0};
+    t.pre.r[1] = 0x0ab00000; t.post.r[1] = 0x0ab00000; t.post.r[2] = 0xffffffab;
+    run(t);
+  }
+  {  // BFEXTS D7{28:8},D2: register fields wrap around bit 0
+    Insn t{"bfexts d7{28:8},d2", 0xebc7, st(0xd20, 0x2711), st(0xd24, 0x2718), {{UISA_LOG_IFETCH, 2, 0xd22, 0x2708}}, 0};
+    t.pre.r[7] = 0x8000000f; t.post.r[7] = 0x8000000f; t.post.r[2] = 0xfffffff8;
+    run(t);
+  }
+  {  // BFFFO D3{8:16},D4: first one bit at offset 19
+    Insn t{"bfffo d3{8:16},d4", 0xedc3, st(0xd30, 0x2704), st(0xd34, 0x2700), {{UISA_LOG_IFETCH, 2, 0xd32, 0x4210}}, 0};
+    t.pre.r[3] = 0x00001000; t.post.r[3] = 0x00001000; t.post.r[4] = 19;
+    run(t);
+  }
+  {  // BFFFO D5{8:16},D4 on an empty field: offset + width, Z set
+    Insn t{"bfffo d5{8:16},d4 (zero)", 0xedc5, st(0xd40, 0x2700), st(0xd44, 0x2704), {{UISA_LOG_IFETCH, 2, 0xd42, 0x4210}}, 0};
+    t.post.r[4] = 24;
+    run(t);
+  }
+  {  // BFTST (A0){D5:8} with D5 = -3: a negative offset reaches the byte below A0
+    Insn t{"bftst (a0){d5:8}", 0xe8d0, st(0xd50, 0x2700), st(0xd54, 0x2708),
+           {{UISA_LOG_IFETCH, 2, 0xd52, 0x0948}, {UISA_LOG_READ, 1, 0x2fff, 0x07}, {UISA_LOG_READ, 1, 0x3000, 0xc0}}, 0};
+    t.pre.r[8] = 0x3000; t.pre.r[5] = 0xfffffffd;
+    t.post.r[8] = 0x3000; t.post.r[5] = 0xfffffffd;
+    run(t);
+  }
+  {  // BFEXTU (d16,A1){7:32},D6: a 32-bit field spanning five bytes
+    Insn t{"bfextu (d16,a1){7:32},d6", 0xe9e9, st(0xd60, 0x2700), st(0xd66, 0x2708),
+           {{UISA_LOG_IFETCH, 2, 0xd62, 0x61c0}, {UISA_LOG_IFETCH, 2, 0xd64, 0x0010},
+            {UISA_LOG_READ, 1, 0x4010, 0x01}, {UISA_LOG_READ, 1, 0x4011, 0x23}, {UISA_LOG_READ, 1, 0x4012, 0x45},
+            {UISA_LOG_READ, 1, 0x4013, 0x67}, {UISA_LOG_READ, 1, 0x4014, 0x89}}, 0};
+    t.pre.r[9] = 0x4000; t.post.r[9] = 0x4000; t.post.r[6] = 0x91a2b3c4;
+    run(t);
+  }
+  {  // BFEXTU (d8,A0,D1.W*4){0:16},D3: brief-format index
+    Insn t{"bfextu (d8,a0,d1.w*4){0:16},d3", 0xe9f0, st(0xd70, 0x2700), st(0xd76, 0x2708),
+           {{UISA_LOG_IFETCH, 2, 0xd72, 0x3010}, {UISA_LOG_IFETCH, 2, 0xd74, 0x1408},
+            {UISA_LOG_READ, 1, 0x1010, 0xbe}, {UISA_LOG_READ, 1, 0x1011, 0xef}}, 0};
+    t.pre.r[8] = 0x1000; t.pre.r[1] = 0xffff0002;
+    t.post.r[8] = 0x1000; t.post.r[1] = 0xffff0002; t.post.r[3] = 0xbeef;
+    run(t);
+  }
   {  // DBEQ D0 with Z clear: decrement and branch back
     Insn t{"dbeq d0", 0x57c8, st(0xf00, 0x2700), st(0xf00 + 2 - 18, 0x2700), {{UISA_LOG_IFETCH, 2, 0xf02, 0xffee}}, 0};
     t.pre.r[0] = 0x00010005; t.post.r[0] = 0x00010004;

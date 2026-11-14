@@ -3,8 +3,6 @@
 VMDIR ?= /tmp/uisa_obj_tb_$(USER)
 GEN := build/uisa_pkg.sv build/uisa.h build/uisa_sem.inc doc/uisa.md build/vectors.hex
 
-UCC := build/compiler/ucc
-
 all: test
 
 $(GEN): spec/uisa.yaml doc/intro.md tools/gen.py tools/uisa.py
@@ -29,6 +27,7 @@ test: $(GEN) compiler
 	python3 tools/flows.py check
 	c++ -std=c++17 -O1 -Wall -Wextra -Ibuild -o build/test_cxx tests/test_cxx.cc
 	./build/test_cxx
+	python3 compiler/tests/test_ucc.py
 	python3 tools/gen_model.py >/dev/null
 	python3 tools/gen_millicode.py >/dev/null
 	c++ -std=c++17 -O1 -Ibuild -Imodel -o build/test_shadow tests/test_shadow.cc model/uisa_shadow.cc

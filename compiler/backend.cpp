@@ -323,12 +323,13 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
   for (Function *f : p->funcs) {
     FnLive L;
     computeLiveness(f, L);
-    int maxLive = 0;
+    int maxLive = 0, worstLine = 0;
+    std::set<Reg *> worst;
     auto note = [&](const std::set<Reg *> &live, int line) {
-      if ((int)live.size() > maxLive) maxLive = (int)live.size();
-      if ((int)live.size() > numColors())
-        error(line ? line : f->line, "%zu values live at once in '%s' but only %d registers: %s", live.size(),
-              f->name.c_str(), numColors(), names(live).c_str());
+      if ((int)live.size() <= maxLive) return;
+      maxLive = (int)live.size();
+      worst = live;
+      worstLine = line ? line : f->line;
     };
     for (BasicBlock *b : f->blocks) {
       int w = weightOf(b);
@@ -390,6 +391,9 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
         note(entry, f->line);
       }
     }
+    if (maxLive > numColors())   // reported once, where the pressure peaks
+      error(worstLine, "%d values live at once in '%s' but only %d registers: %s", maxLive, f->name.c_str(),
+            numColors(), names(worst).c_str());
     ap.maxLive[f] = maxLive;
   }
 }
@@ -674,19 +678,18 @@ static void emitInstr(Emitter &E, Instr *i) {
 }
 
 static void emitFunction(Function *f, FILE *out) {
-  Emitter E;
-  E.label(f->name);
-  for (size_t n = 0; n < f->blocks.size(); n++) {
-    BasicBlock *b = f->blocks[n];
-    BasicBlock *next = n + 1 < f->blocks.size() ? f->blocks[n + 1] : nullptr;
-    if (n) E.label(blockLabel(b));
+  // each block's body, including the phi copies on its (unique, after edge
+  // splitting) outgoing edge
+  std::map<BasicBlock *, std::vector<AsmLine>> body;
+  int line = f->line;
+  for (BasicBlock *b : f->blocks) {
+    Emitter B;
+    B.curLine = line;
     for (Instr *i : b->ins) {
-      if (i->line) E.curLine = i->line;
+      if (i->line) B.curLine = i->line;
       if (i->isTerm()) break;
-      emitInstr(E, i);
+      emitInstr(B, i);
     }
-    Instr *t = b->term();
-    // phi copies on the (unique, after edge splitting) outgoing edge
     if (b->succs.size() == 1) {
       BasicBlock *s = b->succs[0];
       std::vector<std::pair<std::string, std::string>> moves;
@@ -695,21 +698,47 @@ static void emitFunction(Function *f, FILE *out) {
         for (size_t k = 0; k < i->preds.size(); k++)
           if (i->preds[k] == b) moves.push_back({R(i->dst), R(i->a[k])});
       }
-      E.parallelCopy(moves);
+      B.parallelCopy(moves);
     }
-    if (t->line) E.curLine = t->line;
+    line = B.curLine;
+    body[b] = B.out;
+  }
+  // blocks that end up empty and only jump are not emitted; branches to
+  // them go straight to where they lead
+  auto skippable = [&](BasicBlock *b) {
+    return b != f->blocks[0] && body[b].empty() && b->term()->op == Op::Jmp;
+  };
+  auto final = [&](BasicBlock *b) {
+    for (int n = 0; n < 1000 && skippable(b); n++) b = b->term()->t;
+    return b;
+  };
+  std::vector<BasicBlock *> layout;
+  for (BasicBlock *b : f->blocks)
+    if (!skippable(b)) layout.push_back(b);
+
+  Emitter E;
+  E.label(f->name);
+  for (size_t n = 0; n < layout.size(); n++) {
+    BasicBlock *b = layout[n];
+    BasicBlock *next = n + 1 < layout.size() ? layout[n + 1] : nullptr;
+    if (n) E.label(blockLabel(b));
+    E.out.insert(E.out.end(), body[b].begin(), body[b].end());
+    Instr *t = b->term();
+    E.curLine = t->line ? t->line : (body[b].empty() ? E.curLine : body[b].back().line);
     switch (t->op) {
       case Op::Jmp:
-        if (t->t != next) E.jump(blockLabel(t->t));
+        if (final(t->t) != next) E.jump(blockLabel(final(t->t)));
         break;
-      case Op::Br:
-        if (t->t == next) {
-          E.branch(invert(t->cond), R(t->a[0]), R(t->a[1]), blockLabel(t->f));
+      case Op::Br: {
+        BasicBlock *tt = final(t->t), *ff = final(t->f);
+        if (tt == next) {
+          E.branch(invert(t->cond), R(t->a[0]), R(t->a[1]), blockLabel(ff));
         } else {
-          E.branch(t->cond, R(t->a[0]), R(t->a[1]), blockLabel(t->t));
-          if (t->f != next) E.jump(blockLabel(t->f));
+          E.branch(t->cond, R(t->a[0]), R(t->a[1]), blockLabel(tt));
+          if (ff != next) E.jump(blockLabel(ff));
         }
         break;
+      }
       case Op::Ret:
         if (!t->a.empty()) E.mov(R(f->retReg), R(t->a[0]));
         E.text("ret");
