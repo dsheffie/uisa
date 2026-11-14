@@ -170,7 +170,7 @@ GitHub; commit it together with the spec change that produced it.
 
 # Reference (generated)
 
-Spec version **0.1-draft**. 658 concrete instruction variants.
+Spec version **0.1-draft**. 659 concrete instruction variants.
 
 ## Parameters
 
@@ -328,9 +328,10 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `csrc` | S | SYS fn=6 | csr, rs1 | `CSR_WRITE(IMM, CSR_READ(IMM) & ~a);` | (serializes) |
 | `unlock` | S | SYS fn=7 |  |  | End a locked sequence without a store (failed CAS compare). (serializes) |
 | `fence` | S | SYS fn=8 |  |  | Order all earlier memory accesses before all later ones. (serializes) |
-| `tlbflush` | S | SYS fn=9 | rs1, imm |  | Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA. (serializes) |
-| `cpush` | S | SYS fn=10 | rs1, imm |  | Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1. (serializes) |
-| `cinv` | S | SYS fn=11 | rs1, imm |  | Invalidate without write back. Same imm encoding as cpush. (serializes) |
+| `tlbflush` | S | SYS fn=9 | rs1, imm | `MMU_FLUSH(a, IMM);` | Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA. (serializes) |
+| `cpush` | S | SYS fn=10 | rs1, imm | `CACHE_OP(a, IMM, 1);` | Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1. (serializes) |
+| `cinv` | S | SYS fn=11 | rs1, imm | `CACHE_OP(a, IMM, 0);` | Invalidate without write back. Same imm encoding as cpush. (serializes) |
+| `ptest` | S | SYS fn=17 | rd, rs1, imm | `r = MMU_PTEST(a, IMM);` | 68040 PTEST, done by the hardware table walker: translate rs1 with the function code in DFC (imm bit0: 1 = PTESTW, 0 = PTESTR), checking the transparent translation registers and then the tables, load the ATC, and return the MMUSR value. Never faults. (serializes) |
 | `irqack` | S | SYS fn=12 | rd, rs1 |  | Acknowledge the interrupt at level rs1; rd = vector (autovector if none supplied). (serializes) |
 | `stop` | S | SYS fn=13 |  |  | Wait for an interrupt (68k STOP, after millicode has loaded SR). (serializes) |
 | `halt` | S | SYS fn=14 | imm |  | Stop the machine (simulation / debug). imm is a status code. (serializes) |

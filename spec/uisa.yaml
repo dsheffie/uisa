@@ -272,9 +272,10 @@ base_ops:
   - {name: csrc,    major: SYS, fn: 6,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, CSR_READ(IMM) & ~a);"}
   - {name: unlock,  major: SYS, fn: 7,  fmt: S, asm: [], unit: mem, serialize: true, desc: "End a locked sequence without a store (failed CAS compare)."}
   - {name: fence,   major: SYS, fn: 8,  fmt: S, asm: [], unit: mem, serialize: true, desc: "Order all earlier memory accesses before all later ones."}
-  - {name: tlbflush, major: SYS, fn: 9, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA."}
-  - {name: cpush,   major: SYS, fn: 10, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1."}
-  - {name: cinv,    major: SYS, fn: 11, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Invalidate without write back. Same imm encoding as cpush."}
+  - {name: tlbflush, major: SYS, fn: 9, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA.", sem: "MMU_FLUSH(a, IMM);"}
+  - {name: cpush,   major: SYS, fn: 10, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1.", sem: "CACHE_OP(a, IMM, 1);"}
+  - {name: cinv,    major: SYS, fn: 11, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Invalidate without write back. Same imm encoding as cpush.", sem: "CACHE_OP(a, IMM, 0);"}
+  - {name: ptest,   major: SYS, fn: 17, fmt: S, asm: [rd, rs1, imm], unit: sys, serialize: true, sem: "r = MMU_PTEST(a, IMM);", desc: "68040 PTEST, done by the hardware table walker: translate rs1 with the function code in DFC (imm bit0: 1 = PTESTW, 0 = PTESTR), checking the transparent translation registers and then the tables, load the ATC, and return the MMUSR value. Never faults."}
   - {name: irqack,  major: SYS, fn: 12, fmt: S, asm: [rd, rs1], unit: sys, serialize: true, desc: "Acknowledge the interrupt at level rs1; rd = vector (autovector if none supplied)."}
   - {name: stop,    major: SYS, fn: 13, fmt: S, asm: [], unit: sys, serialize: true, desc: "Wait for an interrupt (68k STOP, after millicode has loaded SR)."}
   - {name: halt,    major: SYS, fn: 14, fmt: S, asm: [imm], unit: sys, serialize: true, desc: "Stop the machine (simulation / debug). imm is a status code."}
