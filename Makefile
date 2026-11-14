@@ -12,6 +12,7 @@ gen: $(GEN)
 
 test: $(GEN)
 	python3 tests/selftest.py
+	python3 tests/test_m68kdec.py
 	c++ -std=c++17 -O1 -Wall -Wextra -Ibuild -o build/test_cxx tests/test_cxx.cc
 	./build/test_cxx
 	verilator --binary -Wall -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM --top-module tb_decode \
