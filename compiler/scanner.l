@@ -4,9 +4,21 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <set>
+#include <string>
+#include <vector>
 #include "ast.h"
 #include "errors.h"
 #include "parser.hpp"
+%}
+
+%{
+// #include "file": a stack of buffers; each file is read at most once.
+struct IncludeFrame { YY_BUFFER_STATE buf; const char *file; int vline; };
+static std::vector<IncludeFrame> g_incStack;
+static std::set<std::string> g_included;
+static const char *g_curFile = nullptr;
+static void beginInclude(const char *text);
 %}
 
 %option noyywrap nounput noinput yylineno
@@ -25,6 +37,19 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 <COMM>.                { }
 <COMM><<EOF>>          { error(yylineno, "unterminated comment"); return 0; }
 "//"[^\n]*             { }
+^[ \t]*"#"[ \t]*"include"[ \t]*\"[^"\n]*\"[^\n]* { beginInclude(yytext); }
+^[ \t]*"#"[ \t]*"pragma"[ \t]+"once"[^\n]* { /* every file is read at most once anyway */ }
+"#"[^\n]*             { error(yylineno, "only #include \"file\" is supported, not '%s'", yytext); }
+<<EOF>>             {
+                      if (g_incStack.empty()) yyterminate();
+                      IncludeFrame fr = g_incStack.back();
+                      g_incStack.pop_back();
+                      yy_delete_buffer(YY_CURRENT_BUFFER);
+                      yy_switch_to_buffer(fr.buf);
+                      g_curFile = fr.file;
+                      // the rest of the #include line, then the including file's next line
+                      srcSegment(yylineno, fr.file, fr.vline);
+                    }
 
  /* --------------------- Keywords ------------------------------- */
 "void"              { return T_Void; }
@@ -39,6 +64,9 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 "int"               { yylval.type = new Type(32, true); return T_Type; }
 "unsigned"          { yylval.type = new Type(32, false); return T_Type; }
 "const"             { return T_Const; }
+"struct"            { return T_Struct; }
+"typedef"           { return T_Typedef; }
+"inline"            { return T_Inline; }
 "entry"             { return T_Entry; }
 "while"             { return T_While; }
 "do"                { return T_Do; }
@@ -51,7 +79,7 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 "return"            { return T_Return; }
 "break"             { return T_Break; }
 "continue"          { return T_Continue; }
-"float"|"double"|"long"|"char"|"short"|"struct"|"union"|"goto"|"static" {
+"float"|"double"|"long"|"char"|"short"|"union"|"goto"|"static" {
                       error(yylineno, "'%s' is not part of the millicode C subset", yytext); }
 
  /* -------------------- Operators ----------------------------- */
@@ -68,7 +96,7 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 "+="|"-="|"*="|"/="|"%="|"&="|"|="|"^=" { yylval.op = yytext[0]; return T_OpAssign; }
 "<<="               { yylval.op = 'L'; return T_OpAssign; }
 ">>="               { yylval.op = 'R'; return T_OpAssign; }
-[-+*/%=,;!~<>()\[\]{}:?&|^] { return yytext[0]; }
+[-+*/%=,;!~<>()\[\]{}:?&|^.] { return yytext[0]; }
 
  /* -------------------- Constants ------------------------------ */
 (0[xX]{HEX_DIGIT}+|{DIGIT}+)([uU]|[uU]?[lL][lL]|[lL][lL][uU])? {
@@ -95,7 +123,42 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
                       yylval.lit.isUnsigned = isU;
                       return T_IntConst; }
 
-{IDENTIFIER}        { yylval.ident = strdup(yytext); return T_Identifier; }
+{IDENTIFIER}        {
+                      auto it = g_typeNames.find(yytext);
+                      if (it != g_typeNames.end()) {
+                        yylval.type = new Type(it->second);
+                        return T_Type;
+                      }
+                      yylval.ident = strdup(yytext);
+                      return T_Identifier; }
 .                   { error(yylineno, "unexpected character '%c'", yytext[0]); }
 
 %%
+
+static void beginInclude(const char *text) {
+  const char *q = strchr(text, '"');
+  std::string name(q + 1, strchr(q + 1, '"'));
+  if (!g_curFile) g_curFile = g_srcName;
+  std::string path = name;
+  if (name[0] != '/') {
+    std::string cur = g_curFile;
+    size_t slash = cur.rfind('/');
+    if (slash != std::string::npos) path = cur.substr(0, slash + 1) + name;
+  }
+  char real[4096];
+  std::string key = realpath(path.c_str(), real) ? std::string(real) : path;
+  if (g_included.empty()) {
+    char r0[4096];
+    g_included.insert(realpath(g_srcName, r0) ? std::string(r0) : std::string(g_srcName));
+  }
+  if (!g_included.insert(key).second) return;   // already included once
+  FILE *f = fopen(path.c_str(), "r");
+  if (!f) {
+    error(yylineno, "cannot open include file '%s'", path.c_str());
+    return;
+  }
+  g_incStack.push_back({YY_CURRENT_BUFFER, g_curFile, srcLine(yylineno)});
+  g_curFile = strdup(path.c_str());
+  srcSegment(yylineno, g_curFile, 1);
+  yy_switch_to_buffer(yy_create_buffer(f, YY_BUF_SIZE));
+}

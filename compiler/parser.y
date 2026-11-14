@@ -2,7 +2,8 @@
  *
  * The Java object model (classes, interfaces, arrays, strings, New, Print)
  * is gone; what is left is C's statements and expressions over the integer
- * types u8 u16 u32 u64 s8 s16 s32 s64 (int = s32, unsigned = u32).
+ * types u8 u16 u32 u64 s8 s16 s32 s64 (int = s32, unsigned = u32), plain
+ * structs, typedefs, inline functions with reference parameters.
  */
 
 %{
@@ -15,6 +16,13 @@ extern int yylineno;
 void yyerror(const char *msg) { error(yylineno, "%s", msg); }
 
 TransUnit *parse_result = nullptr;
+std::map<std::string, Type> g_typeNames;
+static StructDef *g_curStruct = nullptr;
+
+static void declareTypeName(const char *n, const Type &t) {
+  if (g_typeNames.count(n)) error(yylineno, "type '%s' defined twice", n);
+  g_typeNames[n] = t;
+}
 %}
 
 %union {
@@ -32,7 +40,7 @@ TransUnit *parse_result = nullptr;
   TransUnit *tu;
 }
 
-%token T_Void T_Const T_Entry T_While T_Do T_For T_If T_Else T_Switch T_Case T_Default
+%token T_Void T_Const T_Entry T_Struct T_Typedef T_Inline T_While T_Do T_For T_If T_Else T_Switch T_Case T_Default
 %token T_Return T_Break T_Continue T_Le T_Ge T_Eq T_Ne T_And T_Or T_Shl T_Shr T_Inc T_Dec
 %token <type> T_Type
 %token <op> T_OpAssign
@@ -41,7 +49,7 @@ TransUnit *parse_result = nullptr;
 
 %type <tu> TransUnit
 %type <fn> FunctionDecl
-%type <type> RetType
+%type <type> RetType TypeSpec
 %type <params> Params ParamList
 %type <block> Block Stmts
 %type <stmt> Stmt DeclStmt ForInit
@@ -59,18 +67,41 @@ Program     : TransUnit                  { parse_result = $1; }
             ;
 
 TransUnit   : TransUnit FunctionDecl     { ($$ = $1)->fns.push_back($2); }
-            | TransUnit T_Const T_Type DeclItems ';'
+            | TransUnit T_Const TypeSpec DeclItems ';'
                                          { $$ = $1; for (auto &d : *$4) $$->consts.push_back(new ConstDecl(*$3, d)); }
+            | TransUnit StructDecl       { $$ = $1; }
+            | TransUnit T_Typedef TypeSpec T_Identifier ';'
+                                         { $$ = $1; declareTypeName($4, *$3); }
             | /* empty */                { $$ = new TransUnit(); }
+            ;
+
+StructDecl  : T_Struct T_Identifier
+                  { g_curStruct = new StructDef(); g_curStruct->name = $2;
+                    Type t; t.sd = g_curStruct; declareTypeName($2, t); }
+              '{' Fields '}' ';'
+                  { if (g_curStruct->fields.empty()) error(yylineno, "struct '%s' has no fields", $2); }
+            ;
+
+Fields      : Fields TypeSpec FieldNames ';' { }
+            | /* empty */                { }
+            ;
+FieldNames  : T_Identifier               { g_curStruct->fields.push_back({$1, *$<type>0}); }
+            | FieldNames ',' T_Identifier { g_curStruct->fields.push_back({$3, *$<type>0}); }
+            ;
+
+TypeSpec    : T_Type                     { $$ = $1; }
+            | T_Struct T_Type            { $$ = $2; if (!$2->isStruct()) error(yylineno, "'struct' before a type that is not a struct"); }
             ;
 
 FunctionDecl: RetType T_Identifier '(' Params ')' Block
                                          { $$ = new FnDecl(*$1, $2, *$4, $6, false); }
+            | T_Inline RetType T_Identifier '(' Params ')' Block
+                                         { $$ = new FnDecl(*$2, $3, *$5, $7, false); $$->isInline = true; }
             | T_Entry RetType T_Identifier '(' Params ')' Block
                                          { $$ = new FnDecl(*$2, $3, *$5, $7, true); }
             ;
 
-RetType     : T_Type                     { $$ = $1; }
+RetType     : TypeSpec                   { $$ = $1; }
             | T_Void                     { $$ = new Type(Type::voidType()); }
             ;
 
@@ -79,8 +110,10 @@ Params      : ParamList                  { $$ = $1; }
             | /* empty */                { $$ = new std::vector<Param>(); }
             ;
 
-ParamList   : T_Type T_Identifier        { ($$ = new std::vector<Param>())->push_back(Param{*$1, $2}); }
-            | ParamList ',' T_Type T_Identifier { ($$ = $1)->push_back(Param{*$3, $4}); }
+ParamList   : TypeSpec T_Identifier      { ($$ = new std::vector<Param>())->push_back(Param{*$1, $2, false}); }
+            | TypeSpec '&' T_Identifier  { ($$ = new std::vector<Param>())->push_back(Param{*$1, $3, true}); }
+            | ParamList ',' TypeSpec T_Identifier { ($$ = $1)->push_back(Param{*$3, $4, false}); }
+            | ParamList ',' TypeSpec '&' T_Identifier { ($$ = $1)->push_back(Param{*$3, $5, true}); }
             ;
 
 Block       : '{' Stmts '}'              { $$ = $2; }
@@ -90,8 +123,8 @@ Stmts       : Stmts Stmt                 { ($$ = $1)->stmts.push_back($2); }
             | /* empty */                { $$ = new Block(); }
             ;
 
-DeclStmt    : T_Type DeclItems ';'       { $$ = new DeclStmt(*$1, *$2, false); }
-            | T_Const T_Type DeclItems ';' { $$ = new DeclStmt(*$2, *$3, true); }
+DeclStmt    : TypeSpec DeclItems ';'     { $$ = new DeclStmt(*$1, *$2, false); }
+            | T_Const TypeSpec DeclItems ';' { $$ = new DeclStmt(*$2, *$3, true); }
             ;
 
 DeclItems   : T_Identifier               { ($$ = new std::vector<DeclItem>())->push_back(DeclItem{$1, nullptr, yylineno}); }
@@ -182,10 +215,11 @@ UnaryExpr   : PostfixExpr                { $$ = $1; }
             | '!' UnaryExpr              { $$ = new UnaryExprNode('!', $2); }
             | T_Inc UnaryExpr            { $$ = new IncDecExpr(true, '+', $2); }
             | T_Dec UnaryExpr            { $$ = new IncDecExpr(true, '-', $2); }
-            | '(' T_Type ')' UnaryExpr   { $$ = new CastExpr(*$2, $4); }
+            | '(' TypeSpec ')' UnaryExpr { $$ = new CastExpr(*$2, $4); }
             ;
 PostfixExpr : PrimaryExpr                { $$ = $1; }
             | T_Identifier '(' Args ')'  { $$ = new CallExpr($1, *$3); }
+            | PostfixExpr '.' T_Identifier { $$ = new MemberExpr($1, $3); }
             | PostfixExpr T_Inc          { $$ = new IncDecExpr(false, '+', $1); }
             | PostfixExpr T_Dec          { $$ = new IncDecExpr(false, '-', $1); }
             ;

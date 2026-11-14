@@ -52,12 +52,26 @@ Labels must be unique across all sources (checked). `millicode/bitfield.c`
 - Functions with parameters and a return value; global and local `const`
   integer declarations (constant expressions). Functions may be called before
   their definition.
+- `struct name { fields };` with scalar or struct fields, value semantics
+  (copy, assign, pass, return; `.field` access and assignment), and
+  `typedef type name;`. After its definition a struct's name is a type
+  name, as in C++.
+- `inline` functions are expanded at every call: no call instruction, no
+  return-stack depth, no register-allocation boundary. Only inline functions
+  take reference parameters (`u64 &z`), which name the caller's variable, as
+  SoftFloat's pointer out-parameters do, and only they return values wider
+  than two words. Recursion through inline functions is an error.
+- Called (non-inline) functions take any number of argument words (a u64 is
+  two, a struct its fields' words) and return at most two words.
+- `#include "file"` (relative to the including file; each file is read at
+  most once; `#pragma once` is accepted and redundant). Diagnostics name the
+  included file and its line.
 - `entry void name(void)` declares a millicode entry point: it is dispatched
   to (never called), may use the entry-ABI intrinsics, cannot return, and
   every path must end in a no-return intrinsic (`__gexit`, `__gfault`, ...).
-- Not in the language: pointers, arrays, structs, floats,
-  globals that are not constants, `goto`, the comma operator, char and string
-  literals, the preprocessor.
+- Not in the language: pointers, arrays, unions, floats, globals that are
+  not constants, `goto`, the comma operator, char and string literals, and
+  the preprocessor beyond `#include`.
 
 ## 64-bit types
 
@@ -206,5 +220,6 @@ which the compiler emits itself) and `lui/auipc` is available as
   will check it on SSA).
 - Dead-flag selection of `.nf` forms, writing results straight into guest
   registers (`__wrg(D2, x + 1)` currently computes into an x register and
-  moves), inlining of small helpers, calls into hand-written millicode, and
-  pointers or arrays through intrinsics only.
+  moves), automatic inlining (only `inline` functions are inlined), calls
+  into hand-written millicode, and pointers or arrays through intrinsics
+  only.

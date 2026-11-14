@@ -16,6 +16,12 @@ extern int g_errors;
 #define UCC_PRINTF(a, b)
 #endif
 
+// Source lines are one global count across #include files (yylineno never
+// restarts); srcFile/srcLine map such a line back to its file and local line.
+void srcSegment(int vline, const char *file, int localLine);
+const char *srcFile(int vline);
+int srcLine(int vline);
+
 void error(int line, const char *fmt, ...) UCC_PRINTF(2, 3);
 [[noreturn]] void fatal(int line, const char *fmt, ...) UCC_PRINTF(2, 3);
 

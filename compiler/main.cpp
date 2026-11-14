@@ -25,10 +25,28 @@ namespace spec {
 const char *g_srcName = "<stdin>";
 int g_errors = 0;
 
+struct SrcSeg { int vline; const char *file; int local; };
+static std::vector<SrcSeg> g_segs;
+void srcSegment(int vline, const char *file, int localLine) { g_segs.push_back({vline, file, localLine}); }
+static const SrcSeg *segOf(int vline) {
+  const SrcSeg *s = nullptr;
+  for (const SrcSeg &x : g_segs)
+    if (x.vline <= vline) s = &x;
+  return s;
+}
+const char *srcFile(int vline) {
+  const SrcSeg *s = segOf(vline);
+  return s ? s->file : g_srcName;
+}
+int srcLine(int vline) {
+  const SrcSeg *s = segOf(vline);
+  return s ? vline - s->vline + s->local : vline;
+}
+
 void error(int line, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  if (line > 0) fprintf(stderr, "%s:%d: error: ", g_srcName, line);
+  if (line > 0) fprintf(stderr, "%s:%d: error: ", srcFile(line), srcLine(line));
   else fprintf(stderr, "%s: error: ", g_srcName);
   vfprintf(stderr, fmt, ap);
   fprintf(stderr, "\n");
@@ -39,7 +57,7 @@ void error(int line, const char *fmt, ...) {
 void fatal(int line, const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  if (line > 0) fprintf(stderr, "%s:%d: error: ", g_srcName, line);
+  if (line > 0) fprintf(stderr, "%s:%d: error: ", srcFile(line), srcLine(line));
   else fprintf(stderr, "%s: error: ", g_srcName);
   vfprintf(stderr, fmt, ap);
   fprintf(stderr, "\n");
@@ -113,6 +131,7 @@ int main(int argc, char **argv) {
     return 2;
   }
   g_srcName = inName;
+  srcSegment(1, inName, 1);
   yyin = fopen(inName, "r");
   if (!yyin) {
     perror(inName);

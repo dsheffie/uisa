@@ -17,11 +17,23 @@
 
 #include <cstring>
 #include <functional>
+#include <set>
 
 #include "errors.h"
 
+int Type::words() const {
+  if (isVoid) return 0;
+  if (sd) {
+    int n = 0;
+    for (auto &f : sd->fields) n += f.second.words();
+    return n;
+  }
+  return bits == 64 ? 2 : 1;
+}
+
 std::string Type::str() const {
   if (isVoid) return "void";
+  if (sd) return "struct " + sd->name;
   return std::string(sign ? "s" : "u") + std::to_string(bits);
 }
 
@@ -34,6 +46,15 @@ struct Sym {
   Type ty;
   bool isConst = false;
   uint64_t cval = 0;        // constants: the value, extended per its type
+  std::vector<Sym> fields;  // struct variables: one per field
+  Sym *alias = nullptr;     // reference parameters: the caller's variable
+};
+
+// One inline expansion in progress.
+struct InlineFrame {
+  FnDecl *fd;
+  Sym ret;                  // where `return` puts the value
+  BasicBlock *join;         // where `return` goes
 };
 
 struct SwitchCtx {
@@ -50,6 +71,9 @@ class CG {
   std::map<std::string, FnDecl *> fns;
   std::vector<BasicBlock *> breaks, conts;
   std::vector<SwitchCtx *> switches;
+  std::vector<InlineFrame *> inl;   // inline expansions, innermost last
+  FnDecl *rootFd = nullptr;         // the function being compiled (inline bodies included)
+  size_t floor = 1;                 // innermost scope a body may see (below it: only globals)
   int line = 0;
 
   Instr *emit(Instr *i) {
@@ -101,10 +125,16 @@ class CG {
     i->a = {src};
     emit(i);
   }
+  // An inlined body sees its own scopes and the globals, not its caller's.
   Sym *lookup(const std::string &n) {
     for (int i = (int)scopes.size() - 1; i >= 0; i--) {
+      if (i > 0 && (size_t)i < floor) i = 0;
       auto it = scopes[i].find(n);
-      if (it != scopes[i].end()) return &it->second;
+      if (it != scopes[i].end()) {
+        Sym *s = &it->second;
+        while (s->alias) s = s->alias;
+        return s;
+      }
     }
     return nullptr;
   }
@@ -136,6 +166,7 @@ static int32_t canon(uint32_t v, Type t) {
 
 static void needValue(const EV &v, int line) {
   if (v.ty.isVoid) error(line, "void value used in an expression");
+  else if (v.ty.isStruct()) error(line, "%s value used as a number", v.ty.str().c_str());
 }
 
 // The value of a constant, extended to 64 bits according to its type.
@@ -150,7 +181,16 @@ static EV constOf(uint64_t v, Type t) {
 }
 
 // Convert a value to type `to`, keeping it canonical.
+static EV constOf(uint64_t v, Type t);
+static EV zeroOf(Type t);
 static EV convert(CG &cg, EV v, Type to) {
+  if (to.isStruct() || v.ty.isStruct()) {   // structs convert only to themselves
+    if (!(to == v.ty)) {
+      error(cg.line, "cannot convert %s to %s", v.ty.str().c_str(), to.str().c_str());
+      return zeroOf(to);
+    }
+    return v;
+  }
   needValue(v, cg.line);
   if (to.isVoid) return v;
   if (v.ty.isVoid) return constOf(0, to);
@@ -637,25 +677,83 @@ EV IntLit::gen(CG &cg) {
 
 static EV symValue(Sym *s) {
   if (s->isConst) return constOf(s->cval, s->ty);
+  if (s->ty.isStruct()) {
+    EV v{Operand(), s->ty};
+    for (Sym &f : s->fields) v.fields.push_back(symValue(&f));
+    return v;
+  }
   if (s->ty.is64()) return EV{Operand::reg(s->var), s->ty, Operand::reg(s->varHi)};
   return EV{Operand::reg(s->var), s->ty};
 }
-// Assign a value already converted to the variable's type.
-// The two words are copied one after the other, so a word that still names
-// the other target variable (d = d << 32 makes the new high word the old low
-// variable) is read into a temporary first.
-static void assignSym(CG &cg, Sym *s, EV v) {
-  if (s->ty.is64() && v.hi.isReg() && v.hi.r == s->var) {
-    Reg *t = cg.temp();
-    cg.copy(t, v.hi);
-    v.hi = Operand::reg(t);
+
+// The 32-bit words of a value / variable, in order (64-bit: low, high;
+// structs: their fields in declaration order). Calls pass and return these.
+static void evWords(const EV &v, std::vector<Operand> &out) {
+  if (v.ty.isStruct()) {
+    for (const EV &f : v.fields) evWords(f, out);
+  } else {
+    out.push_back(v.op);
+    if (v.ty.is64()) out.push_back(v.hi);
   }
-  cg.copy(s->var, v.op);
-  if (s->ty.is64()) cg.copy(s->varHi, v.hi);
+}
+static void symWords(Sym &s, std::vector<Reg *> &out) {
+  if (s.ty.isStruct()) {
+    for (Sym &f : s.fields) symWords(f, out);
+  } else {
+    out.push_back(s.var);
+    if (s.ty.is64()) out.push_back(s.varHi);
+  }
+}
+static EV evFromWords(Type t, const std::vector<Operand> &w, size_t &k) {
+  if (t.isStruct()) {
+    EV v{Operand(), t};
+    for (auto &f : t.sd->fields) v.fields.push_back(evFromWords(f.second, w, k));
+    return v;
+  }
+  EV v{w[k++], t};
+  if (t.is64()) v.hi = w[k++];
+  return v;
+}
+// A zero of any type (error recovery).
+static EV zeroOf(Type t) {
+  if (t.isStruct()) {
+    EV v{Operand(), t};
+    for (auto &f : t.sd->fields) v.fields.push_back(zeroOf(f.second));
+    return v;
+  }
+  return t.isVoid ? EV{Operand(), t} : constOf(0, t);
+}
+
+// Assign a value already converted to the variable's type. The words are
+// copied one after the other, so when the value still names one of the
+// target's own variables (d = d << 32 makes the new high word the old low
+// variable) it is read into temporaries first.
+static void assignSym(CG &cg, Sym *s, EV v) {
+  std::vector<Reg *> dst;
+  std::vector<Operand> src;
+  symWords(*s, dst);
+  evWords(v, src);
+  if (dst.size() != src.size()) return;   // a type error, already reported
+  std::set<Reg *> mine(dst.begin(), dst.end());
+  bool overlap = false;
+  for (size_t k = 1; k < src.size(); k++)
+    if (src[k].isReg() && mine.count(src[k].r)) overlap = true;
+  if (overlap)
+    for (auto &o : src)
+      if (o.isReg()) {
+        Reg *t = cg.temp();
+        cg.copy(t, o);
+        o = Operand::reg(t);
+      }
+  for (size_t k = 0; k < dst.size(); k++) cg.copy(dst[k], src[k]);
 }
 static Sym newVar(CG &cg, Type t, const std::string &name) {
   Sym s;
   s.ty = t;
+  if (t.isStruct()) {
+    for (auto &f : t.sd->fields) s.fields.push_back(newVar(cg, f.second, name + "." + f.first));
+    return s;
+  }
   s.var = cg.var(name);
   if (t.is64()) s.varHi = cg.var(name + ".hi");
   return s;
@@ -669,6 +767,39 @@ EV VarRef::gen(CG &cg) {
     return EV{Operand::cst(0), Type::s32()};
   }
   return symValue(s);
+}
+
+Sym *VarRef::lvalueSym(CG &cg) {
+  Sym *s = cg.lookup(name);
+  if (!s) error(line, "undeclared identifier '%s'", name.c_str());
+  else if (s->isConst) error(line, "assignment to constant '%s'", name.c_str());
+  else return s;
+  return nullptr;
+}
+
+static int fieldIndex(const Type &t, const std::string &f, int line) {
+  if (!t.isStruct()) {
+    error(line, "'.%s' applied to %s, not a struct", f.c_str(), t.str().c_str());
+    return -1;
+  }
+  int k = t.sd->find(f);
+  if (k < 0) error(line, "%s has no field '%s'", t.str().c_str(), f.c_str());
+  return k;
+}
+
+EV MemberExpr::gen(CG &cg) {
+  EV b = base->gen(cg);
+  cg.line = line;
+  int k = fieldIndex(b.ty, field, line);
+  if (k < 0) return EV{Operand::cst(0), Type::s32()};
+  return b.fields[k];
+}
+
+Sym *MemberExpr::lvalueSym(CG &cg) {
+  Sym *b = base->lvalueSym(cg);
+  if (!b) return nullptr;
+  int k = fieldIndex(b->ty, field, line);
+  return k < 0 ? nullptr : &b->fields[k];
 }
 
 EV UnaryExprNode::gen(CG &cg) {
@@ -804,9 +935,14 @@ EV CondExprNode::gen(CG &cg) {
   cg.cur = F;
   EV bv = b->gen(cg);
   BasicBlock *endF = cg.cur;
-  needValue(av, line);
-  needValue(bv, line);
-  Type ct = common(av.ty, bv.ty);
+  Type ct;
+  if (av.ty.isStruct() || bv.ty.isStruct()) {   // both must be the same struct
+    ct = av.ty.isStruct() ? av.ty : bv.ty;
+  } else {
+    needValue(av, line);
+    needValue(bv, line);
+    ct = common(av.ty, bv.ty);
+  }
   Sym v = newVar(cg, ct, "cv");
   cg.cur = endT;
   assignSym(cg, &v, convert(cg, av, ct));
@@ -819,21 +955,11 @@ EV CondExprNode::gen(CG &cg) {
 }
 
 static Sym *lvalue(CG &cg, Expr *e, int line) {
-  const char *n = e->lvalueName();
-  if (!n) {
+  if (!dynamic_cast<VarRef *>(e) && !dynamic_cast<MemberExpr *>(e)) {
     error(line, "assignment to something that is not a variable");
     return nullptr;
   }
-  Sym *s = cg.lookup(n);
-  if (!s) {
-    error(line, "undeclared identifier '%s'", n);
-    return nullptr;
-  }
-  if (s->isConst) {
-    error(line, "assignment to constant '%s'", n);
-    return nullptr;
-  }
-  return s;
+  return e->lvalueSym(cg);
 }
 
 EV AssignExpr::gen(CG &cg) {
@@ -852,6 +978,10 @@ EV IncDecExpr::gen(CG &cg) {
   cg.line = line;
   Sym *s = lvalue(cg, e, line);
   if (!s) return EV{Operand::cst(0), Type::s32()};
+  if (s->ty.isStruct()) {
+    error(line, "++/-- on a struct");
+    return EV{Operand::cst(0), Type::s32()};
+  }
   EV old = symValue(s);
   if (!prefix) {   // the old value outlives the assignment
     Reg *t = cg.temp();
@@ -882,7 +1012,7 @@ EV CallExpr::gen(CG &cg) {
   if (name.compare(0, 2, "__") == 0) {
     if (const EntryReg *er = findEntryReg(name)) {
       if (!args.empty()) error(line, "%s takes no arguments", name.c_str());
-      if (!cg.fn || !cg.fd->entry) {
+      if (!cg.fn || !cg.rootFd->entry) {
         error(line, "%s is only available in an entry function", name.c_str());
         return EV{Operand::cst(0), Type::u32()};
       }
@@ -907,32 +1037,117 @@ EV CallExpr::gen(CG &cg) {
   }
   FnDecl *callee = it->second;
   if (callee->entry) error(line, "entry function '%s' cannot be called", name.c_str());
-  if (callee->params.size() != args.size())
+  if (callee->params.size() != args.size()) {
     error(line, "'%s' takes %zu arguments, %zu given", name.c_str(), callee->params.size(), args.size());
-  std::vector<Operand> ops;   // 64-bit arguments take two words, low first
+    return zeroOf(callee->ret);
+  }
+  if (!cg.fn) {
+    error(line, "not a constant expression");
+    return zeroOf(callee->ret);
+  }
+  if (callee->isInline) return genInline(cg, callee);
+  std::vector<Operand> ops;   // every argument's words: 64-bit low first, structs field by field
   for (size_t i = 0; i < args.size(); i++) {
     EV v = args[i]->gen(cg);
     cg.line = line;
-    if (i >= callee->params.size()) continue;
-    EV cv = convert(cg, v, callee->params[i].t);
-    ops.push_back(cv.op);
-    if (callee->params[i].t.is64()) ops.push_back(cv.hi);
+    evWords(convert(cg, v, callee->params[i].t), ops);
   }
   Instr *c = new Instr(Op::Call);
   c->callee = callee->fn;
   c->a = ops;
-  if (!callee->ret.isVoid) c->dst = cg.temp();
+  int rw = callee->ret.words();
+  if (rw) c->dst = cg.temp();
   cg.emit(c);
-  if (cg.fn) cg.fn->callees.insert(callee->fn);
-  if (callee->ret.isVoid) return EV{Operand(), Type::voidType()};
-  if (callee->ret.is64()) {
+  cg.fn->callees.insert(callee->fn);
+  if (!rw) return EV{Operand(), Type::voidType()};
+  std::vector<Operand> res = {Operand::reg(c->dst)};
+  if (rw == 2) {
     Instr *h = new Instr(Op::CallRes);
     h->callee = callee->fn;
     h->dst = cg.temp();
     cg.emit(h);
-    return EV{Operand::reg(c->dst), callee->ret, Operand::reg(h->dst)};
+    res.push_back(Operand::reg(h->dst));
   }
-  return EV{Operand::reg(c->dst), callee->ret};
+  size_t k = 0;
+  return evFromWords(callee->ret, res, k);
+}
+
+// An inline call: the callee's body is generated here, with its parameters
+// bound to new variables (or, for reference parameters, to the caller's
+// variables) and `return` assigning the result and jumping to the end.
+EV CallExpr::genInline(CG &cg, FnDecl *callee) {
+  for (InlineFrame *f : cg.inl)
+    if (f->fd == callee) {
+      error(line, "inline function '%s' calls itself (recursion is not allowed in millicode)", name.c_str());
+      return zeroOf(callee->ret);
+    }
+  // arguments are evaluated in the caller's scope
+  std::vector<EV> vals(args.size());
+  std::vector<Sym *> refs(args.size(), nullptr);
+  for (size_t i = 0; i < args.size(); i++) {
+    const Param &p = callee->params[i];
+    if (p.ref) {
+      refs[i] = lvalue(cg, args[i], line);
+      if (refs[i] && !(refs[i]->ty == p.t))
+        error(line, "argument %zu of '%s' is a reference to %s, but %s was passed", i + 1, name.c_str(),
+              p.t.str().c_str(), refs[i]->ty.str().c_str());
+    } else {
+      vals[i] = args[i]->gen(cg);
+    }
+  }
+  cg.line = line;
+  InlineFrame fr;
+  fr.fd = callee;
+  fr.join = cg.block("inl");
+  if (!callee->ret.isVoid) fr.ret = newVar(cg, callee->ret, callee->name + ".ret");
+  size_t savedFloor = cg.floor;
+  FnDecl *savedFd = cg.fd;
+  std::vector<BasicBlock *> savedBreaks, savedConts;
+  std::vector<SwitchCtx *> savedSwitches;
+  std::swap(savedBreaks, cg.breaks);
+  std::swap(savedConts, cg.conts);
+  std::swap(savedSwitches, cg.switches);
+  cg.scopes.emplace_back();
+  cg.floor = cg.scopes.size() - 1;
+  for (size_t i = 0; i < args.size(); i++) {
+    const Param &p = callee->params[i];
+    Sym s;
+    if (p.ref) {
+      if (!refs[i] || !(refs[i]->ty == p.t)) s = newVar(cg, p.t, p.name);   // error recovery
+      else {
+        s.ty = p.t;
+        s.alias = refs[i];
+      }
+    } else {
+      s = newVar(cg, p.t, p.name);
+      assignSym(cg, &s, convert(cg, vals[i], p.t));
+    }
+    cg.declare(p.name, s, callee->line);
+  }
+  cg.fd = callee;
+  cg.inl.push_back(&fr);
+  callee->body->gen(cg);
+  cg.line = callee->line;
+  if (!cg.cur->terminated()) {
+    if (callee->ret.isVoid) {
+      cg.jmp(fr.join);
+    } else {   // reported later, and only if reachable
+      Instr *i = new Instr(Op::Stop);
+      i->falloff = true;
+      cg.emit(i);
+    }
+  }
+  cg.inl.pop_back();
+  cg.fd = savedFd;
+  cg.scopes.pop_back();
+  cg.floor = savedFloor;
+  std::swap(savedBreaks, cg.breaks);
+  std::swap(savedConts, cg.conts);
+  std::swap(savedSwitches, cg.switches);
+  cg.cur = fr.join;
+  cg.line = line;
+  if (callee->ret.isVoid) return EV{Operand(), Type::voidType()};
+  return symValue(&fr.ret);
 }
 
 EV CallExpr::genIntrinsic(CG &cg, const IntrinsicDesc *d) {
@@ -1166,19 +1381,25 @@ void ReturnStmt::gen(CG &cg) {
     error(line, "entry function '%s' cannot return; end it with __gexit() or __gfault()", fd->name.c_str());
     return;
   }
-  Instr *r = new Instr(Op::Ret);
+  EV rv;
   if (e) {
     EV v = e->gen(cg);
     cg.line = line;
     if (fd->ret.isVoid) error(line, "void function '%s' returns a value", fd->name.c_str());
-    else {
-      EV rv = convert(cg, v, fd->ret);
-      r->a = {rv.op};
-      if (fd->ret.is64()) r->a.push_back(rv.hi);
-    }
+    else rv = convert(cg, v, fd->ret);
   } else if (!fd->ret.isVoid) {
     error(line, "function '%s' must return a value", fd->name.c_str());
+    rv = zeroOf(fd->ret);
   }
+  if (!cg.inl.empty()) {   // inside an inline expansion: assign the result, go to the end
+    InlineFrame *fr = cg.inl.back();
+    if (!fd->ret.isVoid) assignSym(cg, &fr->ret, rv);
+    cg.jmp(fr->join);
+    cg.endWithDeadBlock();
+    return;
+  }
+  Instr *r = new Instr(Op::Ret);
+  if (!fd->ret.isVoid) evWords(rv, r->a);
   cg.emit(r);
   cg.endWithDeadBlock();
 }
@@ -1226,23 +1447,31 @@ Program *generateTAC(TransUnit *tu) {
     if (cg.fns.count(fd->name)) error(fd->line, "function '%s' defined twice", fd->name.c_str());
     if (fd->entry && (!fd->ret.isVoid || !fd->params.empty()))
       error(fd->line, "entry function '%s' must be declared `entry void %s(void)`", fd->name.c_str(), fd->name.c_str());
+    cg.fns[fd->name] = fd;
+    if (fd->isInline) continue;   // expanded where it is called; no code of its own
+    for (auto &p : fd->params)
+      if (p.ref) error(fd->line, "reference parameter '%s': only inline functions take references", p.name);
+    if (fd->ret.words() > 2)
+      error(fd->line, "'%s' returns %s (%d words); only inline functions return more than two words",
+            fd->name.c_str(), fd->ret.str().c_str(), fd->ret.words());
     fd->fn = new Function(fd->name);
     fd->fn->isEntry = fd->entry;
     fd->fn->returnsValue = !fd->ret.isVoid;
-    fd->fn->retWords = fd->ret.isVoid ? 0 : fd->ret.is64() ? 2 : 1;
+    fd->fn->retWords = fd->ret.words();
     fd->fn->line = fd->line;
-    cg.fns[fd->name] = fd;
     cg.prog->funcs.push_back(fd->fn);
   }
   for (FnDecl *fd : tu->fns) {
+    if (fd->isInline) continue;
     cg.fd = fd;
+    cg.rootFd = fd;
     cg.fn = fd->fn;
     cg.cur = cg.fn->newBlock("entry");
     cg.scopes.emplace_back();
+    cg.floor = 1;
     for (auto &p : fd->params) {
       Sym s = newVar(cg, p.t, p.name);
-      cg.fn->paramVars.push_back(s.var);
-      if (s.varHi) cg.fn->paramVars.push_back(s.varHi);
+      symWords(s, cg.fn->paramVars);
       cg.declare(p.name, s, fd->line);
     }
     fd->body->gen(cg);

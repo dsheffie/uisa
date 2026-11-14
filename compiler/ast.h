@@ -20,19 +20,41 @@
 
 extern int yylineno;
 
+struct StructDef;
+
 struct Type {
   int bits = 32;
   bool sign = true;
   bool isVoid = false;
+  StructDef *sd = nullptr;    // struct types: the definition
   Type() {}
   Type(int bits, bool sign) : bits(bits), sign(sign) {}
   static Type voidType() { Type t; t.isVoid = true; return t; }
   static Type s32() { return Type(32, true); }
   static Type u32() { return Type(32, false); }
-  bool is64() const { return !isVoid && bits == 64; }
+  bool is64() const { return !isVoid && !sd && bits == 64; }
+  bool isStruct() const { return sd != nullptr; }
+  int words() const;          // 32-bit words a value of this type occupies
   std::string str() const;
-  bool operator==(const Type &o) const { return isVoid == o.isVoid && bits == o.bits && sign == o.sign; }
+  bool operator==(const Type &o) const {
+    return isVoid == o.isVoid && sd == o.sd && (sd || (bits == o.bits && sign == o.sign));
+  }
 };
+
+// struct name { fields }: plain value semantics, scalar or struct fields.
+struct StructDef {
+  std::string name;
+  std::vector<std::pair<std::string, Type>> fields;
+  int find(const std::string &f) const {
+    for (size_t i = 0; i < fields.size(); i++)
+      if (fields[i].first == f) return (int)i;
+    return -1;
+  }
+};
+
+// Struct and typedef names; the scanner returns them as type tokens (the
+// classic C lexer hack).
+extern std::map<std::string, Type> g_typeNames;
 
 class CG;
 class Block;
@@ -40,13 +62,17 @@ class Block;
 // The value of an expression: a TAC operand plus its C type. Every value is
 // kept canonical for its type (u8 zero-extended, s8 sign-extended, ...), so
 // integer promotion never needs an instruction. A 64-bit value is two words:
-// `op` holds the low 32 bits and `hi` the high 32 bits.
+// `op` holds the low 32 bits and `hi` the high 32 bits. A struct value is
+// its fields.
 struct EV {
   Operand op;
   Type ty;
   Operand hi;
-  bool isConst() const { return op.isImm() && (!ty.is64() || hi.isImm()); }
+  std::vector<EV> fields;
+  bool isConst() const { return !ty.isStruct() && op.isImm() && (!ty.is64() || hi.isImm()); }
 };
+
+struct Sym;
 
 class Node {
  public:
@@ -60,7 +86,8 @@ class Expr : public Node {
   virtual EV gen(CG &cg) = 0;
   // Branch to t if the expression is nonzero, else to f.
   virtual void genCond(CG &cg, BasicBlock *t, BasicBlock *f);
-  virtual const char *lvalueName() const { return nullptr; }
+  // The variable (or struct field) an assignment writes, or null.
+  virtual Sym *lvalueSym(CG &cg) { (void)cg; return nullptr; }
 };
 
 class IntLit : public Expr {
@@ -75,7 +102,15 @@ class VarRef : public Expr {
   std::string name;
   VarRef(const char *n) : name(n) {}
   EV gen(CG &cg) override;
-  const char *lvalueName() const override { return name.c_str(); }
+  Sym *lvalueSym(CG &cg) override;
+};
+
+class MemberExpr : public Expr {   // base.field
+ public:
+  Expr *base; std::string field;
+  MemberExpr(Expr *b, const char *f) : base(b), field(f) {}
+  EV gen(CG &cg) override;
+  Sym *lvalueSym(CG &cg) override;
 };
 
 class UnaryExprNode : public Expr {
@@ -144,6 +179,7 @@ class CallExpr : public Expr {
   EV gen(CG &cg) override;
  private:
   EV genIntrinsic(CG &cg, const IntrinsicDesc *d);
+  EV genInline(CG &cg, class FnDecl *callee);
 };
 
 class Stmt : public Node {
@@ -232,11 +268,12 @@ class ContinueStmt : public Stmt {
   void gen(CG &cg) override;
 };
 
-struct Param { Type t; const char *name; };
+struct Param { Type t; const char *name; bool ref = false; };
 
 class FnDecl : public Node {
  public:
   Type ret; std::string name; std::vector<Param> params; Block *body; bool entry;
+  bool isInline = false;   // expanded at every call; may take reference parameters
   Function *fn = nullptr;
   FnDecl(Type r, const char *n, std::vector<Param> p, Block *b, bool e)
       : ret(r), name(n), params(std::move(p)), body(b), entry(e) {}
