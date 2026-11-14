@@ -352,19 +352,41 @@ struct Neighbourhoods {
   }
 };
 
-void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbose) {
+void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool optimize, bool verbose) {
   const int K = numColors();   // colors 1..K are x1..xK
-  z3::context c;
-  z3::optimize opt(c);
-  z3::params prm(c);
-  prm.set("rlimit", rlimit);
-  opt.set(prm);
 
   // everything below is keyed and ordered by a value's index in ap.vals,
   // never by pointer, so z3 sees the same problem on every run
   std::map<Reg *, int> idx;
   for (Reg *v : ap.vals) idx[v] = (int)idx.size();
   auto byIdx = [&](Reg *a, Reg *b) { return idx.at(a) < idx.at(b); };
+
+  // preferred pairs (soft: share a register), weights summed
+  PrefMap prefs([&](const std::pair<Reg *, Reg *> &x, const std::pair<Reg *, Reg *> &y) {
+    int a = idx.at(x.first), b = idx.at(y.first);
+    return a != b ? a < b : idx.at(x.second) < idx.at(y.second);
+  });
+  for (auto &pr : ap.prefs) {
+    if (pr.a == pr.b || !idx.count(pr.a) || !idx.count(pr.b)) continue;
+    auto key = byIdx(pr.a, pr.b) ? std::make_pair(pr.a, pr.b) : std::make_pair(pr.b, pr.a);
+    prefs[key] += pr.weight;
+  }
+  int total = 0;
+  bool haveGreedy = greedyAllocate(p, ap, prefs);
+  int greedyCost = haveGreedy ? moveCost(prefs, &total) : -1;
+  // -O0 (debug builds): the greedy allocation, no z3
+  if (!optimize && haveGreedy) {
+    if (verbose)
+      fprintf(stderr, "ucc: %zu values, %zu interference edges, %zu call sites; greedy move cost %d of %d (-O0)\n",
+              ap.vals.size(), ap.edges.size(), ap.calls.size(), greedyCost, total);
+    return;
+  }
+
+  z3::context c;
+  z3::optimize opt(c);
+  z3::params prm(c);
+  prm.set("rlimit", rlimit);
+  opt.set(prm);
   std::map<Reg *, std::vector<z3::expr>> B;
   for (Reg *v : ap.vals) {
     z3::expr_vector vs(c);
@@ -410,15 +432,6 @@ void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbo
       for (int k = 0; k < K; k++) opt.add(!U.at(cs.callee)[k] || !B.at(v)[k]);
 
   // soft: preferred pairs share a register
-  PrefMap prefs([&](const std::pair<Reg *, Reg *> &x, const std::pair<Reg *, Reg *> &y) {
-    int a = idx.at(x.first), b = idx.at(y.first);
-    return a != b ? a < b : idx.at(x.second) < idx.at(y.second);
-  });
-  for (auto &pr : ap.prefs) {
-    if (pr.a == pr.b || !B.count(pr.a) || !B.count(pr.b)) continue;
-    auto key = byIdx(pr.a, pr.b) ? std::make_pair(pr.a, pr.b) : std::make_pair(pr.b, pr.a);
-    prefs[key] += pr.weight;
-  }
   int n = 0;
   for (auto &pw : prefs) {
     z3::expr s = c.bool_const(("s" + std::to_string(n++)).c_str());
@@ -426,9 +439,6 @@ void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbo
     opt.add_soft(s, (unsigned)pw.second);
   }
 
-  int total = 0;
-  bool haveGreedy = greedyAllocate(p, ap, prefs);
-  int greedyCost = haveGreedy ? moveCost(prefs, &total) : -1;
   std::map<Reg *, int> cur;   // the best allocation so far
   if (haveGreedy)
     for (Reg *v : ap.vals) {

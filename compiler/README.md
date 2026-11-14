@@ -16,7 +16,7 @@ once with z3.
 
 ```
 make compiler                       # CMake build into build/compiler (needs flex, bison 3, z3, python3 + PyYAML)
-build/compiler/ucc [-o out.s] [-v] [--dump-tac] [--rlimit n] file.c
+build/compiler/ucc [-o out.s] [-v] [--dump-tac] [-O0|-O2] [--rlimit n] file.c
 python3 compiler/tests/test_ucc.py [iterations [name]]  # compiler tests (also run by `make`)
 ```
 
@@ -137,7 +137,10 @@ which the compiler emits itself) and `lui/auipc` is available as
   a register. Each function's parameter and return registers are part of the
   solution, so there is no fixed calling convention and no caller/callee-saved
   split. The result is verified independently of z3 before emission.
-- **How the allocation is found.** Three stages, all deterministic (z3 runs
+- **How the allocation is found.** `-O0` (the default, used by `make` and
+  the tests) stops after stage 1: a valid allocation in a fraction of a
+  second. `-O2` is for deploy builds (`make release` compiles the millicode
+  with it) and runs all three stages. Everything is deterministic (z3 runs
   under a resource budget, `--rlimit`, default 300M, never a wall-clock
   timeout, and the problem is keyed by value index, so the same source gives
   the same millicode on every machine):
@@ -145,10 +148,10 @@ which the compiler emits itself) and `lui/auipc` is available as
      coloring), each taking a register its colored preference partners use;
      then single values move where more partners are. Always feasible when
      the pressure checks pass; it is z3's starting point and the fallback.
-  2. *Whole program.* Up to 700 values, z3 gets a third of the budget to
+  2. *Whole program* (`-O2`). Up to 700 values, z3 gets a third of the budget to
      solve the whole problem and prove it optimal (`t_u64div`, 649 values:
      30 s; `t_u64div2`, 570: 14 s; bitfield.c: well under a second).
-  3. *Neighbourhoods.* Otherwise, each step frees a small set of values,
+  3. *Neighbourhoods* (`-O2`). Otherwise, each step frees a small set of values,
      fixes every other one, and z3 solves that piece optimally as its own
      small problem (fixed neighbours become excluded registers, preferences
      to fixed values become one-register soft literals, call clobbers become

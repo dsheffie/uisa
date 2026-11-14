@@ -26,6 +26,9 @@ import uisa  # noqa: E402
 
 ROOT = os.path.join(HERE, "..")
 UCC = os.path.join(ROOT, "build", "compiler", "ucc")
+# -O0 (default, debug builds): greedy register allocation; -O2 (deploy
+# builds, `make release`): the z3 search. Set with UCCFLAGS.
+UCCFLAGS = os.environ.get("UCCFLAGS", "-O0").split()
 
 
 def source_text(src):
@@ -34,7 +37,7 @@ def source_text(src):
         out_dir = os.path.join(ROOT, "build", "millicode")
         os.makedirs(out_dir, exist_ok=True)
         out = os.path.join(out_dir, os.path.splitext(src)[0] + ".s")
-        if subprocess.call([UCC, path, "-o", out]) != 0:
+        if subprocess.call([UCC] + UCCFLAGS + [path, "-o", out]) != 0:
             sys.exit("millicode: ucc failed on %s" % src)
         path = out
     with open(path) as f:

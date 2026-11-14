@@ -32,8 +32,9 @@ struct AllocProblem {
 void buildAllocProblem(Program *p, AllocProblem &ap);
 // Check register pressure against the register file; hard errors, no spilling.
 void checkPressure(Program *p, AllocProblem &ap);
-// Assign Reg::color for every value (regalloc.cpp, z3).
-void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbose);
+// Assign Reg::color for every value (regalloc.cpp): the greedy allocation,
+// or with `optimize` the z3 search under the resource budget `rlimit`.
+void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool optimize, bool verbose);
 // Check that coloring satisfies every constraint (independent of the solver).
 void verifyAllocation(Program *p, AllocProblem &ap);
 // Emit uisa assembly text.

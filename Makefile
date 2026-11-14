@@ -1,6 +1,10 @@
 # Regenerate everything from spec/uisa.yaml and run the checks.
 # Verilator's generated makefiles cannot live under a path containing spaces.
 VMDIR ?= /tmp/uisa_obj_tb_$(USER)
+# ucc flags for millicode written in C: -O0 greedy register allocation for
+# everyday builds, -O2 the z3 search for deploy builds (`make release`)
+UCCFLAGS ?= -O0
+export UCCFLAGS
 GEN := build/uisa_pkg.sv build/uisa.h build/uisa_sem.inc doc/uisa.md build/vectors.hex
 
 all: test
@@ -36,7 +40,11 @@ test: $(GEN) compiler
 		--Mdir $(VMDIR) build/uisa_pkg.sv tests/tb_decode.sv -o tb_decode >/dev/null
 	$(VMDIR)/tb_decode
 
+# deploy build: millicode compiled with the optimal (z3) register allocation
+release:
+	$(MAKE) UCCFLAGS=-O2 test
+
 clean:
 	rm -rf build $(VMDIR)
 
-.PHONY: all gen flows compiler test clean
+.PHONY: all gen flows compiler test release clean

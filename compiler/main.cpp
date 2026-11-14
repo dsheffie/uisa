@@ -1,6 +1,6 @@
 /* main.cpp: ucc, the uisa millicode compiler driver.
  *
- *   ucc [-o out.s] [-v] [--dump-tac] [--rlimit n] file.c
+ *   ucc [-o out.s] [-v] [--dump-tac] [-O0|-O2] [--rlimit n] file.c
  *
  * Pipeline: parse -> TAC -> CFG cleanup -> SSA -> SSA cleanups -> call-graph
  * checks (no recursion, return-stack depth) -> legalization -> liveness and
@@ -94,19 +94,22 @@ static void checkCallGraph(Program *p) {
 int main(int argc, char **argv) {
   const char *outName = nullptr, *inName = nullptr;
   bool verbose = false, dumpTac = false;
-  unsigned rlimit = 300000000;  // z3 resource budget: deterministic, unlike a timeout
+  unsigned rlimit = 300000000;  // z3 resource budget (-O2): deterministic, unlike a timeout
+  bool optimize = false;        // -O0: greedy allocation (debug builds); -O2: z3 (deploy builds)
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-o") && i + 1 < argc) outName = argv[++i];
     else if (!strcmp(argv[i], "-v")) verbose = true;
     else if (!strcmp(argv[i], "--dump-tac")) dumpTac = true;
+    else if (!strcmp(argv[i], "-O0")) optimize = false;
+    else if (!strcmp(argv[i], "-O2") || !strcmp(argv[i], "-O")) optimize = true;
     else if (!strcmp(argv[i], "--rlimit") && i + 1 < argc) rlimit = (unsigned)strtoul(argv[++i], nullptr, 0);
     else if (argv[i][0] == '-') {
-      fprintf(stderr, "usage: ucc [-o out.s] [-v] [--dump-tac] [--rlimit n] file.c\n");
+      fprintf(stderr, "usage: ucc [-o out.s] [-v] [--dump-tac] [-O0|-O2] [--rlimit n] file.c\n");
       return 2;
     } else inName = argv[i];
   }
   if (!inName) {
-    fprintf(stderr, "usage: ucc [-o out.s] [-v] [--dump-tac] [--rlimit n] file.c\n");
+    fprintf(stderr, "usage: ucc [-o out.s] [-v] [--dump-tac] [-O0|-O2] [--rlimit n] file.c\n");
     return 2;
   }
   g_srcName = inName;
@@ -138,7 +141,7 @@ int main(int argc, char **argv) {
   stopOnErrors();
   checkPressure(prog, ap);
   stopOnErrors();
-  allocateRegisters(prog, ap, rlimit, verbose);
+  allocateRegisters(prog, ap, rlimit, optimize, verbose);
   stopOnErrors();
   verifyAllocation(prog, ap);
   FILE *out = outName ? fopen(outName, "w") : stdout;
