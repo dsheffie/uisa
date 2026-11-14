@@ -531,6 +531,35 @@ int main() {
     t.post.r[15] = 0x7ff8; t.post.ctl[UISA_CTL_USP] = 0x4000; t.post.ctl[UISA_CTL_VBR] = 0x1000;
     run(t);
   }
+  {  // MOVE.L ([$10,A0,D1.L*4],$4),D2: full format, pre-indexed, word bd and od; 8 bytes
+    Insn t{"move.l ([bd,a0,d1.l*4],od),d2", 0x2430, st(0x2300, 0x2700), st(0x2308, 0x2708),
+           {{UISA_LOG_IFETCH, 2, 0x2302, 0x1d22}, {UISA_LOG_IFETCH, 2, 0x2304, 0x0010}, {UISA_LOG_IFETCH, 2, 0x2306, 0x0004},
+            {UISA_LOG_READ, 4, 0x101c, 0x2000}, {UISA_LOG_READ, 4, 0x2004, 0xdeadbeef}}, 0};
+    t.pre.r[8] = 0x1000; t.pre.r[1] = 3;
+    t.post.r[8] = 0x1000; t.post.r[1] = 3; t.post.r[2] = 0xdeadbeef;
+    run(t);
+  }
+  {  // LEA ($12345),A1 via (bd,ZA0,ZD0): base and index suppressed, long bd; 8 bytes
+    Insn t{"lea (bd.l,za0,zd0),a1", 0x43f0, st(0x2400, 0x2700), st(0x2408, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0x2402, 0x01f0}, {UISA_LOG_IFETCH, 4, 0x2404, 0x00012345}}, 0};
+    t.post.r[9] = 0x12345;
+    run(t);
+  }
+  {  // JSR ([A0],D1.W): post-indexed, null bd/od; return address = pc + 4
+    Insn t{"jsr ([a0],d1.w)", 0x4eb0, st(0x2500, 0x2700), st(0x4002, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0x2502, 0x1115}, {UISA_LOG_READ, 4, 0x3000, 0x4000}, {UISA_LOG_WRITE, 4, 0x7ffc, 0x2504}}, 0};
+    t.pre.r[8] = 0x3000; t.pre.r[1] = 0xffff0002; t.pre.r[15] = 0x8000;
+    t.post.r[8] = 0x3000; t.post.r[1] = 0xffff0002; t.post.r[15] = 0x7ffc;
+    run(t);
+  }
+  {  // MULU.L ([8,A0],2),D1 in millicode: memory indirect, index suppressed; 10 bytes
+    Insn t{"mulu.l ([bd,a0],od),d1", 0x4c30, st(0x2600, 0x2700), st(0x260a, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0x2602, 0x1000}, {UISA_LOG_IFETCH, 2, 0x2604, 0x0162}, {UISA_LOG_IFETCH, 2, 0x2606, 0x0008},
+            {UISA_LOG_IFETCH, 2, 0x2608, 0x0002}, {UISA_LOG_READ, 4, 0x5008, 0x6000}, {UISA_LOG_READ, 4, 0x6002, 7}}, 0};
+    t.pre.r[8] = 0x5000; t.pre.r[1] = 6;
+    t.post.r[8] = 0x5000; t.post.r[1] = 42;
+    run(t);
+  }
   fails += random_divl(20000);
   fails += random_divw(20000);
   fails += random_bfwrite(20000);
