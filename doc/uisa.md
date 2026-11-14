@@ -367,7 +367,7 @@ Each family expands into sized forms (see *Sized operations* above). `<f>.8`/`<f
 | `nbcd` | 22 | unary | 8 |  | X Z | N Z V C X |  |
 | `mulu` | 23 | full | 16,32 |  | - | N Z V C | .16: 16x16->32 (MULU.W). .32: low 32 bits, V on overflow (MULU.L 32-bit result). High half: base mulhu. |
 | `muls` | 24 | full | 16,32 |  | - | N Z V C |  |
-| `divu` | 25 | tiedfull | 16,32 |  | - | N Z V C | .16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd is unchanged and V is set. .32: quotient only; remainder via base remu. Precondition: divisor != 0 (millicode checks and raises the zero-divide exception first) |
+| `divu` | 25 | tiedfull | 16,32 |  | - | N Z V C | .16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd, N and Z are unchanged, V is set and C cleared (as the 68040 does). .32: quotient only; remainder via base remu. Precondition: divisor != 0 (millicode checks and raises the zero-divide exception first) |
 | `divs` | 26 | tiedfull | 16,32 |  | - | N Z V C | Precondition: divisor != 0 |
 | `ext` | 27 | unary | 16,32 |  | - | N Z V C | .16: EXT.W (byte to word, merged). .32: EXT.L (word to long). |
 | `extb` | 28 | unary | 32 |  | - | N Z V C | EXTB.L (byte to long). |
@@ -609,7 +609,7 @@ N = MSB(r, 32); Z = (r == 0); C = 0;
 ```c
 if (n == 16) {
   uint32_t d = b & 0xffff, q = a / d, rm = a % d;
-  if (q > 0xffff) { r = a; V = 1; N = 0; Z = 0; }
+  if (q > 0xffff) { r = a; V = 1; }
   else { r = (rm << 16) | q; V = 0; N = MSB(q, 16); Z = (q == 0); }
 } else { r = a / b; V = 0; N = MSB(r, 32); Z = (r == 0); }
 C = 0;
@@ -620,9 +620,9 @@ C = 0;
 ```c
 if (n == 16) {
   int64_t d = SX(b, 16), q = (int64_t)(int32_t)a / d, rm = (int64_t)(int32_t)a % d;
-  if (q > 32767 || q < -32768) { r = a; V = 1; N = 0; Z = 0; }
+  if (q > 32767 || q < -32768) { r = a; V = 1; }
   else { r = (((uint32_t)rm & 0xffff) << 16) | ((uint32_t)q & 0xffff); V = 0; N = MSB((uint32_t)q, 16); Z = (q == 0); }
-} else if (a == 0x80000000u && b == 0xffffffffu) { r = a; V = 1; N = 0; Z = 0; }
+} else if (a == 0x80000000u && b == 0xffffffffu) { r = a; V = 1; }
 else { r = (uint32_t)((int32_t)a / (int32_t)b); V = 0; N = MSB(r, 32); Z = (r == 0); }
 C = 0;
 ```
@@ -744,13 +744,22 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | 0x21 | `fpsr` | Reserved for the FP extension. |
 | 0x22 | `fpiar` | Reserved for the FP extension. |
 | 0x40 | `mstatus` | Micro-engine status: pending interrupt level, trace pending, locked-sequence active. |
-| 0x41 | `fault_addr` | Guest access fault: faulting address. |
-| 0x42 | `fault_status` | Guest access fault: read/write, size, space and function code, cause. |
+| 0x41 | `fault_addr` | Guest access fault: faulting address (68040 frame FA and WB3A). |
+| 0x42 | `fault_status` | Guest access fault: 68040 special status word (SSW): read/write, size, transfer type and modifier, continuation bits. |
 | 0x43 | `fault_pc` | Guest PC of the instruction that faulted. |
 | 0x44 | `mcycle` | Cycle counter. |
 | 0x45 | `ginstret` | Guest instructions retired. |
 | 0x46 | `dispatch_base` | Hidden-memory base of the opword dispatch table. |
 | 0x47 | `scratch_base` | Hidden-memory base of millicode scratch storage. |
+| 0x48 | `fault_ea` | Guest access fault: effective address of the faulting instruction (68040 frame EA). |
+| 0x49 | `wb2_status` | Guest access fault: pending writeback 2 status (68040 frame WB2S). |
+| 0x4a | `wb2_addr` | Guest access fault: pending writeback 2 address (WB2A). |
+| 0x4b | `wb3_status` | Guest access fault: pending writeback 3 status (WB3S); WB3 is the faulting store. |
+| 0x4c | `wb3_data` | Guest access fault: pending writeback 3 data (WB3D). |
+| 0x4d | `fault_pd0` | Guest access fault: MOVE16 line data 0 / writeback 1 data (PD0, WB1D). |
+| 0x4e | `fault_pd1` | Guest access fault: MOVE16 line data 1 (PD1). |
+| 0x4f | `fault_pd2` | Guest access fault: MOVE16 line data 2 (PD2). |
+| 0x50 | `fault_pd3` | Guest access fault: MOVE16 line data 3 (PD3). |
 
 ## Millicode entry points
 
@@ -763,14 +772,16 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 
 **exception**: Guest exception raised by a guest access fault, gfault, or a decode-time condition (illegal, privilege, line A/F).
 
-- `x1`: vector number
-- `x2`: guest PC to stack
-- `x3`: fault address (access errors)
-- `x4`: fault status (access errors)
+- `x1`: vector number (2 for an access fault)
+- `x2`: guest PC to stack (gpc when raised; the faulting instruction for access faults)
+- `x3`: address of the instruction that raised it (format 2 frames)
+
+Access faults (vector 2) leave the 68040 frame fields in the fault_* and wb* CSRs.
 
 **interrupt**: Taken at a guest instruction boundary when the pending level exceeds the SR mask.
 
 - `x1`: interrupt level
+- `x2`: vector number (from the interrupt acknowledge; 24 + level when autovectored)
 
 **trace**: Taken after gexit when trace is pending.
 

@@ -42,6 +42,18 @@ void uisa_shadow_log(int kind, uint32_t addr, int size, uint32_t value);
 void uisa_shadow_post(const struct uisa_m68k_state *s);
 void uisa_shadow_dump(void);
 
+/* Exceptions the host takes outside an instruction's pre/post pair: an
+ * interrupt (vector 24 + level for an autovector) or an access fault
+ * (vector 2, with the 68040 frame fields in `fault`). Call exc_pre with the
+ * state on entry to exception processing and exc_post when it is done; log
+ * the accesses in between as for an instruction. */
+struct uisa_fault {
+	uint32_t addr, ssw, ea, wb2_status, wb2_addr, wb3_status, wb3_data, pd[4];
+};
+void uisa_shadow_exc_pre(int vector, int level, const struct uisa_m68k_state *s, const struct uisa_fault *fault);
+void uisa_shadow_exc_post(const struct uisa_m68k_state *s);
+uint64_t uisa_shadow_exc_count(int vector, int result);
+
 /* For tests: how many times `opword` produced `result` (0 = match, 1 = reg
  * mismatch, ... in the order of the report columns). */
 uint64_t uisa_shadow_count(uint16_t opword, int result);

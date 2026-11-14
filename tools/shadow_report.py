@@ -19,13 +19,16 @@ def main():
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--details", type=int, default=40)
     a = ap.parse_args()
-    cols, rows, details, kinds, extra = None, [], [], "", ""
+    cols, rows, details, kinds, extra, events = None, [], [], "", "", []
     with open(a.report) as f:
         for line in f:
             if line.startswith("# kinds:"):
                 kinds = line[len("# kinds:"):].strip()
-            elif line.startswith("# millicode"):
-                extra = line[2:].strip()
+            elif line.startswith("# millicode") or line.startswith("# exceptions"):
+                extra += ("\n" if extra else "") + line[2:].strip()
+            elif line.startswith("# event "):
+                p = line.split()
+                events.append((int(p[2]), int(p[3]), [int(x) for x in p[4:]]))
             elif line.startswith("# opword"):
                 cols = line[2:].split()[2:]
             elif line.startswith("! "):
@@ -49,6 +52,12 @@ def main():
     for c in cols:
         if shadowed[c]:
             print("  %-16s %12d  %6.3f%%" % (c, shadowed[c], 100.0 * shadowed[c] / max(1, total)))
+    if events:
+        print("\nexceptions taken outside instructions (interrupts, access faults):")
+        for vec, n, res in events:
+            name = "access fault" if vec == 2 else ("interrupt level %d" % (vec - 24) if 24 <= vec < 32 else "vector")
+            parts = ", ".join("%s %d" % (c, v) for c, v in zip(cols, res) if v)
+            print("  vector %-3d %-20s %10d  (%s)" % (vec, name, n, parts))
     info = ("match", "aborted", "native", "exception")
     bad = [(sum(v for c, v in cnt.items() if c not in info), form, cnt) for form, cnt in per_form.items()]
     bad = sorted((b for b in bad if b[0]), reverse=True)

@@ -169,7 +169,7 @@ index 6dd9e35..3271355 100644
  
  STATIC_INLINE uae_u32 get_ibyte_mmu060 (int o)
 diff --git a/previous-code/src/cpu/newcpu.c b/previous-code/src/cpu/newcpu.c
-index 4b43250..0bf127c 100644
+index 4b43250..cda9f06 100644
 --- a/previous-code/src/cpu/newcpu.c
 +++ b/previous-code/src/cpu/newcpu.c
 @@ -18,6 +18,7 @@
@@ -180,7 +180,7 @@ index 4b43250..0bf127c 100644
  
  #include "main.h"
  #include "compat.h"
-@@ -1920,8 +1921,178 @@ void set_cpu_caches (bool flush)
+@@ -1920,8 +1921,207 @@ void set_cpu_caches (bool flush)
  	flush_cpu_caches(flush);
  }
  
@@ -283,6 +283,35 @@ index 4b43250..0bf127c 100644
 +	uisa_state (&s);
 +	uisa_shadow_post (&s);
 +}
++
++/* Interrupts and access faults are taken outside an instruction's pre/post
++ * pair; shadow their exception processing as separate events. */
++static void uisa_shadow_exc_pre_hook (int nr, int vector_nr)
++{
++	struct uisa_m68k_state s;
++	struct uisa_fault f;
++	uisa_state (&s);
++	memset (&f, 0, sizeof f);
++	if (nr == 2) {
++		f.addr = regs.mmu_fault_addr;
++		f.ssw = regs.mmu_ssw;
++		f.ea = regs.mmu_effective_addr;
++		f.wb2_status = regs.wb2_status;
++		f.wb2_addr = regs.wb2_address;
++		f.wb3_status = regs.wb3_status;
++		f.wb3_data = regs.wb3_data;
++		for (int i = 0; i < 4; i++)
++			f.pd[i] = mmu040_move16[i];
++	}
++	uisa_shadow_exc_pre (vector_nr, nr >= 24 ? nr - 24 : 0, &s, nr == 2 ? &f : NULL);
++}
++
++static void uisa_shadow_exc_post_hook (void)
++{
++	struct uisa_m68k_state s;
++	uisa_state (&s);
++	uisa_shadow_exc_post (&s);
++}
 +#endif
 +
 +static void ophist_dump (void)
@@ -359,7 +388,7 @@ index 4b43250..0bf127c 100644
  }
  
  static uae_u32 opcode_swap(uae_u16 opcode)
-@@ -2407,6 +2578,7 @@ void check_prefs_changed_cpu(void)
+@@ -2407,6 +2607,7 @@ void check_prefs_changed_cpu(void)
  
  void init_m68k (void)
  {
@@ -367,7 +396,30 @@ index 4b43250..0bf127c 100644
  	disasm_init();
  	prefs_changed_cpu ();
  	update_68k_cycles ();
-@@ -6414,6 +6586,10 @@ static void m68k_run_mmu040 (void)
+@@ -3338,6 +3539,11 @@ static void Exception_mmu (int nr, uaecptr oldpc)
+ 	interrupt = nr >= 24 && nr < 24 + 8;
+ 	if (interrupt)
+ 		vector_nr = iack_cycle(nr);
++#ifdef UISA_SHADOW
++	bool uisa_exc = uisa_shadow_path && currprefs.mmu_model == 68040 && (nr == 2 || interrupt);
++	if (uisa_exc)
++		uisa_shadow_exc_pre_hook (nr, vector_nr);
++#endif
+ 
+ 	// exception vector fetch and exception stack frame
+ 	// operations don't allocate new cachelines
+@@ -3402,6 +3608,10 @@ static void Exception_mmu (int nr, uaecptr oldpc)
+ 		regs.intmask = nr - 24;
+ 	fill_prefetch ();
+ 	exception_check_trace (nr);
++#ifdef UISA_SHADOW
++	if (uisa_exc)
++		uisa_shadow_exc_post_hook ();
++#endif
+ }
+ 
+ static void add_approximate_exception_cycles(int nr)
+@@ -6414,6 +6624,10 @@ static void m68k_run_mmu040 (void)
  				mmu_opcode = regs.opcode = x_prefetch (0);
  				count_instr (regs.opcode);
  				cpu_cycles = (*cpufunctbl[regs.opcode])(regs.opcode);

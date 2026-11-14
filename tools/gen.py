@@ -533,6 +533,9 @@ def gen_doc(spec):
             for r, desc in e["regs"].items():
                 out.append("- `%s`: %s" % (r, desc))
             out.append("")
+        if e.get("note"):
+            out.append(e["note"])
+            out.append("")
     write("uisa.md", "\n".join(out) + "\n", os.path.join(ROOT, "doc"))
 
 
