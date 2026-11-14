@@ -9,6 +9,10 @@
 # PLA flows retire atomically, so the order of address-register updates
 # relative to loads and stores does not affect restartability.
 #
+# A pure store to a -(An) or (An)+ destination uses the writeback stores
+# (st.<w>.pre / st.<w>.post) instead of a separate address update; a
+# read-modify-write destination still uses the fragment's addi.
+#
 # PLA uops are not encoded: immediates are full 32-bit values even where the
 # corresponding millicode encoding has a narrower field. tools/flows.py checks
 # each expanded uop against spec/uisa.yaml using small representative values.
@@ -138,7 +142,7 @@ ops:
     any: ["addi {D}, {base}, {disp}"]
   PEA:
     src: addr
-    any: ["addi a7, a7, -4", "st.32.gd {EA}, 0(a7)"]
+    any: ["st.32.pre.gd {EA}, -4(a7)"]
   MULU: {src: read, dst: rmw, any: ["mulu.16 {D}, {D}, {S}"]}
   MULS: {src: read, dst: rmw, any: ["muls.16 {D}, {D}, {S}"]}
   EXT:
@@ -172,16 +176,16 @@ ops:
     mem: ["s.{cc} {D}"]
   Bcc: {any: ["gbcc.{cc} {disp_br}"]}
   BRA: {any: ["gbcc.t {disp_br}"]}
-  BSR: {any: ["gpcaddi {T}, {len}", "addi a7, a7, -4", "st.32.gd {T}, 0(a7)", "gbcc.t {disp_br}"]}
+  BSR: {any: ["gpushr a7, {len}", "gbcc.t {disp_br}"]}
   DBF:
     dst: rmw
     any: ["subi.16.nf {D}, 1", "addi {T}, {D}, 1", "zext16 {T}, {T}", "gbnz {T}, {disp_br}"]
-  RTS: {any: ["ld.32.gd {T}, 0(a7)", "addi a7, a7, 4", "gjr {T}"]}
+  RTS: {any: ["ld.32.gd {T}, 0(a7)", "addi a7, a7, 4", "gjr {T}, 0"]}
   JSR:
     src: addr
-    any: ["gpcaddi {T}, {len}", "addi a7, a7, -4", "st.32.gd {T}, 0(a7)", "gjr {EA}"]
-  JMP: {src: addr, any: ["gjr {EA}"]}
-  LINK: {any: ["addi a7, a7, -4", "st.32.gd {A}, 0(a7)", "add {A}, a7, x0", "addi a7, a7, {imm}"]}
+    any: ["gpushr a7, {len}", "gjr {base}, {disp}"]
+  JMP: {src: addr, any: ["gjr {base}, {disp}"]}
+  LINK: {any: ["st.32.pre.gd {A}, -4(a7)", "add {A}, a7, x0", "addi a7, a7, {imm}"]}
   UNLK: {any: ["add a7, {A}, x0", "ld.32.gd {A}, 0(a7)", "addi a7, a7, 4"]}
   NOP: {any: ["addi x0, x0, 0"]}
   EXG: {any: ["add {T}, d1, x0", "add d1, d2, x0", "add d2, {T}, x0"]}

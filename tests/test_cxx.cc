@@ -105,7 +105,7 @@ static void test_decode() {
     n++;
   }
   check(n == UISA_NUM_OPS - 1, "vector count");
-  check(decode(0xffffffffu).op == UISA_ILLEGAL, "reserved major is illegal");
+  check(decode(0xc4000000u).op == UISA_ILLEGAL, "reserved major (FP, 49) is illegal");
 }
 
 int main() {

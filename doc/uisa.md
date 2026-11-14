@@ -98,6 +98,17 @@ TAS, CAS and CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or
 `unlock` ends it. They execute non-speculatively at the head of the ROB. The
 machine is single-core, so locking only has to exclude DMA.
 
+Stores can write back their base register: `st.<w>.pre` stores to `rs1 + imm`
+and sets `rd` to that address, `st.<w>.post` stores to `rs1` and sets `rd` to
+`rs1 + imm`. `rd` is tied to `rs1`, so each is two register reads and one
+result, like the sized merge forms. `gpushr` is the call-specific version: it
+stores the return address (the guest instruction's address plus an immediate,
+known at decode) to `a7 - 4` and writes back `a7`. These are ordinary
+speculative stores whose register result is ready at address generation, not
+atomics executed at the head of the ROB. They turn pushes, `-(An)`/`(An)+`
+destinations, `LINK`, `PEA`, `BSR` and `JSR` into one or two micro-ops. Loads
+get no writeback form: a post-increment load would need two results.
+
 `probe.r`/`probe.w` translate without accessing and return a status instead
 of faulting. They build PTEST and let millicode check every address it will
 touch before it changes any guest state.
@@ -159,7 +170,7 @@ GitHub; commit it together with the spec change that produced it.
 
 # Reference (generated)
 
-Spec version **0.1-draft**. 633 concrete instruction variants.
+Spec version **0.1-draft**. 658 concrete instruction variants.
 
 ## Parameters
 
@@ -204,6 +215,7 @@ Two renamed flag resources: `nzvc` (N Z V C), `x` (X).
 | G | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `fn[7:2]` `sz[1:0]` |  |
 | GI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `sz[7:6]` `imm[5:0]` | unsigned |
 | M | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `imm[11:0]` | signed |
+| MW | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `imm[5:0]` | signed |
 | S | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `imm[7:0]` | unsigned |
 | BFI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:12]` `f[11:11]` `off[10:6]` `wid[5:1]` `rsv[0:0]` |  |
 | CG | `op[31:26]` `cond[25:22]` `imm[21:0]` | signed |
@@ -222,7 +234,7 @@ Base ops can override immediate signedness (e.g. logical immediates are zero-ext
 | **32** | LDL32 | STU8 | STU16 | STU32 | PROBER | PROBEW | SYS | BF |
 | **40** | BFI | GBCC | GBZ | GPCADDI | GOPN | GOPZN | GOPIN | GOPIZN |
 | **48** | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* |
-| **56** | - | - | - | - | - | - | - | - |
+| **56** | GJR | GPUSHR | STPRE8 | STPRE16 | STPRE32 | STPOST8 | STPOST16 | STPOST32 |
 
 ## Base operations
 
@@ -306,7 +318,8 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `gbcc.<cc>` | CG | GBCC cond=cc | imm | `if (COND) GNPC_SET(GPC_INSN + b);` | Guest conditional branch (Bcc, BRA via gbcc.t). cc: t f hi ls cc cs ne eq vc vs pl mi ge lt gt le. (reads nzvc) |
 | `gbz` | BG | GBZ | rs1, imm | `if (a == 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is zero. |
 | `gbnz` | BG | GBZ | rs1, imm | `if (a != 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is nonzero (DBF). |
-| `gjr` | S | SYS fn=17 | rs1 | `GNPC_SET(a);` | Guest jump to the address in rs1 (JMP, JSR, RTS). |
+| `gjr` | I | GJR | rs1, imm | `GNPC_SET(a + b);` | Guest jump to rs1 + imm (JMP, JSR, RTS). gjr x0, abs jumps to an absolute address. |
+| `gpushr` | I | GPUSHR | rd, imm | `GSTORE(GDATA, a - 4, 4, GPC_INSN + b); r = a - 4;` | Push a return address: mem[rd - 4] = guest instruction address + imm (its length); rd = rd - 4. One register source and one result (rd is tied to rs1); the data is an immediate. A speculative store whose register result is ready at address generation. |
 | `gpcaddi` | I | GPCADDI | rd, imm | `r = GPC_INSN + b;` | rd = guest instruction address + imm (return addresses, PC-relative operands). |
 | `ret` | S | SYS fn=2 |  | `npc = CSTACK_POP();` | Return through the hardware millicode return stack. Underflow is a millicode fault. |
 | `csrr` | S | SYS fn=3 | rd, csr | `r = CSR_READ(IMM);` |  |
@@ -701,6 +714,12 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | `stu.32` | STU32 | store lock-end | 4 |  |
 | `probe.r` | PROBER | probe | 0 | Translate for read without accessing; rd = 0 if the access would succeed, else a fault status. Never faults. |
 | `probe.w` | PROBEW | probe | 0 |  |
+| `st.8.pre` | STPRE8 | store | 1 |  |
+| `st.16.pre` | STPRE16 | store | 2 |  |
+| `st.32.pre` | STPRE32 | store | 4 |  |
+| `st.8.post` | STPOST8 | store | 1 |  |
+| `st.16.post` | STPOST16 | store | 2 |  |
+| `st.32.post` | STPOST32 | store | 4 |  |
 
 ## Control and status registers
 

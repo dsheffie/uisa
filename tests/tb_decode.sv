@@ -31,7 +31,7 @@ module tb_decode;
         fails++;
       end
     end
-    if (uisa_decode(32'hffffffff).op != UISA_ILLEGAL) fails++;
+    if (uisa_decode(32'hc4000000).op != UISA_ILLEGAL) fails++;  // major 49: reserved for FP
     $display("tb_decode: %0d vectors, %0d failures", count, fails);
     if (fails != 0) $fatal(1);
     $finish;

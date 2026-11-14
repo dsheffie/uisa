@@ -94,6 +94,8 @@ formats:
   G:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[fn,7,2],[sz,1,0]]}
   GI:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,8],[sz,7,6],[imm,5,0]], imm: {signed: false, scale: 1}}
   M:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[sp,13,12],[imm,11,0]], imm: {signed: true, scale: 1}}
+  # stores with base-register writeback: rd is tied to rs1 and receives the updated address
+  MW:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[sp,7,6],[imm,5,0]], imm: {signed: true, scale: 1}}
   S:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,8],[imm,7,0]], imm: {signed: false, scale: 1}}
   BFI: {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,12],[f,11,11],["off",10,6],[wid,5,1],[rsv,0,0]]}
   # guest control flow: displacements are bytes, relative to the guest instruction's address
@@ -151,6 +153,14 @@ majors:
   GOPZN: 45
   GOPIN: 46
   GOPIZN: 47
+  GJR: 56
+  GPUSHR: 57
+  STPRE8: 58
+  STPRE16: 59
+  STPRE32: 60
+  STPOST8: 61
+  STPOST16: 62
+  STPOST32: 63
 
 # ---------------------------------------------------------------------------
 # Base operations: a conventional clean RISC. No flags, full 32-bit results.
@@ -248,7 +258,10 @@ base_ops:
   - {family: gbcc, major: GBCC, per_cond: guest, fmt: CG, asm: [imm], unit: br, cti: gbranch, reads_flags: [nzvc], sem: "if (COND) GNPC_SET(GPC_INSN + b);", desc: "Guest conditional branch (Bcc, BRA via gbcc.t)."}
   - {name: gbz,     major: GBZ, cond: 0, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a == 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is zero."}
   - {name: gbnz,    major: GBZ, cond: 1, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a != 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is nonzero (DBF)."}
-  - {name: gjr,     major: SYS, fn: 17, fmt: S, asm: [rs1], unit: br, cti: gjump, sem: "GNPC_SET(a);", desc: "Guest jump to the address in rs1 (JMP, JSR, RTS)."}
+  - {name: gjr,     major: GJR, fmt: I, asm: [rs1, imm], imm_signed: true, unit: br, cti: gjump, sem: "GNPC_SET(a + b);", desc: "Guest jump to rs1 + imm (JMP, JSR, RTS). gjr x0, abs jumps to an absolute address."}
+  - {name: gpushr,  major: GPUSHR, fmt: I, asm: [rd, imm], tied: true, imm_signed: true, unit: mem, store_bytes: 4,
+     sem: "GSTORE(GDATA, a - 4, 4, GPC_INSN + b); r = a - 4;",
+     desc: "Push a return address: mem[rd - 4] = guest instruction address + imm (its length); rd = rd - 4. One register source and one result (rd is tied to rs1); the data is an immediate. A speculative store whose register result is ready at address generation."}
   - {name: gpcaddi, major: GPCADDI, fmt: I, asm: [rd, imm], imm_signed: true, unit: alu, sem: "r = GPC_INSN + b;", desc: "rd = guest instruction address + imm (return addresses, PC-relative operands)."}
   - {name: ret,     major: SYS, fn: 2,  fmt: S, asm: [], unit: br, cti: ret, sem: "npc = CSTACK_POP();", desc: "Return through the hardware millicode return stack. Underflow is a millicode fault."}
   - {name: csrr,    major: SYS, fn: 3,  fmt: S, asm: [rd, csr], unit: sys, sem: "r = CSR_READ(IMM);"}
@@ -267,6 +280,7 @@ base_ops:
 
 # ---------------------------------------------------------------------------
 # Memory operations. Big-endian. The `sp` field selects the address space;
+# the .pre/.post stores also write back the base register (see `writeback`);
 # the generator emits one mnemonic per space (e.g. ld.32.gd). Guest-space
 # accesses may be misaligned; an implementation may split them in hardware
 # or take an invisible millicode assist. Misaligned hidden accesses are a
@@ -289,6 +303,17 @@ mem_ops:
   - {name: stu.32, major: STU32, kind: store, bytes: 4, locked: end}
   - {name: probe.r, major: PROBER, kind: probe, bytes: 0, desc: "Translate for read without accessing; rd = 0 if the access would succeed, else a fault status. Never faults."}
   - {name: probe.w, major: PROBEW, kind: probe, bytes: 0}
+  # Stores with base writeback, for -(An) and (An)+ destinations and pushes.
+  # .pre:  address = rs1 + imm, rd = address      (st.32.pre.gd d0, -4(a7))
+  # .post: address = rs1,       rd = rs1 + imm    (st.32.post.gd d0, 4(a0))
+  # rd is tied to rs1 (two register reads, one result). They are ordinary
+  # speculative stores; the register result is ready at address generation.
+  - {name: st.8.pre,   major: STPRE8,   kind: store, bytes: 1, writeback: pre}
+  - {name: st.16.pre,  major: STPRE16,  kind: store, bytes: 2, writeback: pre}
+  - {name: st.32.pre,  major: STPRE32,  kind: store, bytes: 4, writeback: pre}
+  - {name: st.8.post,  major: STPOST8,  kind: store, bytes: 1, writeback: post}
+  - {name: st.16.post, major: STPOST16, kind: store, bytes: 2, writeback: post}
+  - {name: st.32.post, major: STPOST32, kind: store, bytes: 4, writeback: post}
 
 # ---------------------------------------------------------------------------
 # Guest-semantic ops (68k ALU behaviour). Each family expands into:

@@ -240,8 +240,18 @@ class Expander:
                     uops.append(self.load(size, S, base, disp))
                 else:
                     S = val
+                # the 68k updates a (An)+ source before computing the
+                # destination address, which matters when both use one An
+                uops += post
+                post = []
+        wb_store = None
         if dst:
             pre, val, base, disp, p2, mem = self.fragment("dst", dst, size, self.t["t3"], self.t["t2"], lay.get("dst", 2))
+            if dst[0] in ("-(An)", "(An)+") and spec.get("dst") == "write":
+                # fold the address update into a writeback store
+                inc = (p2 or pre)[0].rsplit(",", 1)[1].strip()
+                wb_store = ("pre" if dst[0] == "-(An)" else "post", inc)
+                pre, p2 = [], []
             uops += pre
             post = p2 + post
             if mem:
@@ -279,7 +289,10 @@ class Expander:
         if dst_mem and spec.get("dst") in ("rmw", "write"):
             what = spec.get("store", "D")
             val = {"S": b.get("{S}"), "D": D, "x0": "x0"}[what]
-            uops.append("st.%d.gd %s, %s(%s)" % (w, val, dst_mem[1], dst_mem[0]))
+            if wb_store:
+                uops.append("st.%d.%s.gd %s, %s(%s)" % (w, wb_store[0], val, wb_store[1], dst_mem[0]))
+            else:
+                uops.append("st.%d.gd %s, %s(%s)" % (w, val, dst_mem[1], dst_mem[0]))
         uops += post
         uops = self.peephole(uops)
         return Flow("pla", uops)

@@ -132,6 +132,7 @@ class Spec:
                           desc=op.get("desc", ""), note=op.get("note", ""),
                           cti=op.get("cti"), serialize=op.get("serialize", False),
                           tied=op.get("tied", False), reads_rd=op.get("reads_rd", False),
+                          store_bytes=op.get("store_bytes"),
                           imm_signed=op.get("imm_signed", fmt.imm_signed),
                           imm_max=op.get("imm_max"),
                           reads_flags=self._flag_resources(op.get("reads_flags", [])),
@@ -162,18 +163,19 @@ class Spec:
             self._add(Variant(op["name"], fmt, fixed, op["asm"], **common))
 
     def _expand_mem(self, ops):
-        fmt = self.formats["M"]
         for op in ops:
+            wb = op.get("writeback")
+            fmt = self.formats["MW" if wb else "M"]
             for sp in self.spaces:
                 fixed = {"op": self.majors[op["major"]], "sp": sp["code"]}
-                if op["kind"] == "store":
-                    operands = ["rd", "mem"]     # rd field carries the store data
+                if wb:
+                    operands = ["rs2", "mem"]    # data in rs2; rd = rs1 gets the new address
                 else:
-                    operands = ["rd", "mem"]
+                    operands = ["rd", "mem"]     # loads: rd is the result; stores: rd carries the data
                 attrs = dict(kind=op["kind"], unit="mem", bytes=op["bytes"],
                              signed=op.get("signed", False), locked=op.get("locked"),
-                             space=sp["name"], desc=op.get("desc", ""), sem=None,
-                             cti=None, serialize=op.get("locked") is not None, tied=False,
+                             space=sp["name"], desc=op.get("desc", ""), sem=None, writeback=wb,
+                             cti=None, serialize=op.get("locked") is not None, tied=bool(wb),
                              imm_signed=True, imm_max=None, reads_flags=[], writes_flags=[],
                              major=op["major"], family=op["name"])
                 self._add(Variant("%s.%s" % (op["name"], sp["suffix"]), fmt, fixed, operands, **attrs))
@@ -261,13 +263,13 @@ class Spec:
             r.append("rs1")
         if "rs2" in ops:
             r.append("rs2")
-        if v.kind == "store" or v.attrs.get("reads_rd"):
+        if (v.kind == "store" and not v.attrs.get("writeback")) or v.attrs.get("reads_rd"):
             r.append("rd")
         return r
 
     def writes_rd(self, v):
         if v.kind == "store":
-            return False
+            return bool(v.attrs.get("writeback"))
         if v.kind == "guest":
             return v.gform != "compare"
         return "rd" in v.operands
@@ -281,7 +283,9 @@ class Spec:
         """values: dict of field-level operand values (rd, rs1, rs2, imm, off, wid)."""
         word = v.match
         vals = dict(values)
-        if v.tied:
+        if v.attrs.get("writeback"):
+            vals["rd"] = vals["rs1"]       # the base register is also the result
+        elif v.tied:
             vals["rs1"] = vals["rd"]
         for name, value in vals.items():
             if name == "imm":

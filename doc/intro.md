@@ -98,6 +98,17 @@ TAS, CAS and CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or
 `unlock` ends it. They execute non-speculatively at the head of the ROB. The
 machine is single-core, so locking only has to exclude DMA.
 
+Stores can write back their base register: `st.<w>.pre` stores to `rs1 + imm`
+and sets `rd` to that address, `st.<w>.post` stores to `rs1` and sets `rd` to
+`rs1 + imm`. `rd` is tied to `rs1`, so each is two register reads and one
+result, like the sized merge forms. `gpushr` is the call-specific version: it
+stores the return address (the guest instruction's address plus an immediate,
+known at decode) to `a7 - 4` and writes back `a7`. These are ordinary
+speculative stores whose register result is ready at address generation, not
+atomics executed at the head of the ROB. They turn pushes, `-(An)`/`(An)+`
+destinations, `LINK`, `PEA`, `BSR` and `JSR` into one or two micro-ops. Loads
+get no writeback form: a post-increment load would need two results.
+
 `probe.r`/`probe.w` translate without accessing and return a status instead
 of faulting. They build PTEST and let millicode check every address it will
 touch before it changes any guest state.
