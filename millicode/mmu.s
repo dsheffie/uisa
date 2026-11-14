@@ -168,7 +168,7 @@ pflushan:
         jal     x0, exit
 
 ; ---------------------------------------------------------------------------
-; PTESTW (An) / PTESTR (An) (privileged): MMUSR = the table walker's result
+; PTESTW (An) / PTESTR (An) (privileged): MMUSR = probe through DFC (.ga)
 ; ---------------------------------------------------------------------------
 ptest_insn:
         andi    x9, gsr, 0x2000
@@ -178,10 +178,10 @@ ptest_insn:
         rdg     x6, x8
         andi    x5, x1, 0x20            ; set: PTESTR
         b.ne    x5, x0, ptestr
-        ptest   x7, x6, 1
+        probe.w.ga x7, 0(x6)
         jal     x0, ptest_done
 ptestr:
-        ptest   x7, x6, 0
+        probe.r.ga x7, 0(x6)
 ptest_done:
         csrw    mmusr, x7
         jal     x0, exit

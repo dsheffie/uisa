@@ -116,7 +116,7 @@ struct Machine {
   std::vector<uint32_t> cstack;
   bool done = false, raised = false;
   uint32_t vector = 0;
-  uint32_t oracle_mmusr = 0;   // the host's MMUSR after the instruction (PTEST result)
+  uint32_t oracle_mmusr = 0;   // the host's MMUSR after the instruction (probe result)
   uint32_t mc_insns = 0;
 
   void failf(int r, const char *fmt = nullptr, uint32_t v = 0) {
@@ -268,7 +268,9 @@ struct Machine {
     uint32_t immv = imm(u);
     uint32_t a = R[u.rs1];
     uint32_t b = o.reads_rs2 ? R[u.rs2] : immv;
-    if (o.is_load && !o.is_probe) {
+    if (o.is_probe) {
+      R[u.rd] = oracle_mmusr;                    // the table walker's result comes from the host
+    } else if (o.is_load) {
       uint32_t addr = a + immv, v = load(addr, o.mem_bytes);
       if (o.load_signed) v = (uint32_t)SX(v, 8 * o.mem_bytes);
       R[u.rd] = v;
@@ -315,12 +317,11 @@ struct Machine {
 #define CSTACK_POP() cstack_pop()
 #define GSTORE(sp, addr, n, v) store((addr), (n), (v))
 #define GDATA 1
-// No ATC or caches in the functional model: flushes have no visible effect,
-// and PTEST's table walk is the hardware walker's, so its result comes from
-// the host (the shadow checks the millicode around it, not the walk).
+// No ATC or caches in the functional model: flushes have no visible effect.
+// (probe's table walk is the hardware walker's; step() takes its result from
+// the host, so the shadow checks the millicode around it, not the walk.)
 #define MMU_FLUSH(addr, how) ((void)(addr))
 #define CACHE_OP(addr, how, push) ((void)(addr))
-#define MMU_PTEST(addr, how) ((void)(addr), oracle_mmusr)
     switch (u.op) {
 #include "uisa_sem.inc"
     default:
