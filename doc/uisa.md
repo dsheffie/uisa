@@ -537,7 +537,7 @@ V = 0; N = MSB(r, n); Z = (r == 0);
 **`roxl`**
 
 ```c
-unsigned k = (b & 63) % (n + 1); uint64_t w = ((uint64_t)xin << n) | (a & m); uint64_t wm = MSK(n + 1);
+unsigned k = (b & 63) % (n + 1); uint64_t w = ((uint64_t)xin << n) | (a & m); uint64_t wm = (1ull << (n + 1)) - 1;   /* n + 1 bits: MSK() saturates at 32 */
 if (k) w = ((w << k) | (w >> (n + 1 - k))) & wm;
 r = (uint32_t)(w & m); X = (w >> n) & 1; C = X;
 V = 0; N = MSB(r, n); Z = (r == 0);
@@ -546,7 +546,7 @@ V = 0; N = MSB(r, n); Z = (r == 0);
 **`roxr`**
 
 ```c
-unsigned k = (b & 63) % (n + 1); uint64_t w = ((uint64_t)xin << n) | (a & m); uint64_t wm = MSK(n + 1);
+unsigned k = (b & 63) % (n + 1); uint64_t w = ((uint64_t)xin << n) | (a & m); uint64_t wm = (1ull << (n + 1)) - 1;   /* n + 1 bits: MSK() saturates at 32 */
 if (k) w = ((w >> k) | (w << (n + 1 - k))) & wm;
 r = (uint32_t)(w & m); X = (w >> n) & 1; C = X;
 V = 0; N = MSB(r, n); Z = (r == 0);

@@ -18,7 +18,7 @@ index 31e9fc4..4c076ba 100644
  if(ENABLE_OSX_BUNDLE)
  	set(GUIOSX_SOURCES
 diff --git a/previous-code/src/cpu/cpummu.h b/previous-code/src/cpu/cpummu.h
-index 6dd9e35..f02a19e 100644
+index 6dd9e35..5e19caa 100644
 --- a/previous-code/src/cpu/cpummu.h
 +++ b/previous-code/src/cpu/cpummu.h
 @@ -817,29 +817,45 @@ static ALWAYS_INLINE void uae_mmu_put_move16(uaecptr addr, uae_u32 *val)
@@ -70,7 +70,15 @@ index 6dd9e35..f02a19e 100644
  }
  // normal 060
  STATIC_INLINE void put_byte_mmu060 (uaecptr addr, uae_u32 v)
-@@ -975,24 +991,32 @@ STATIC_INLINE uae_u32 get_ibyte_mmu040 (int o)
+@@ -970,29 +986,39 @@ STATIC_INLINE uae_u32 get_lrmw_long_mmu040 (uaecptr addr)
+ STATIC_INLINE uae_u32 get_ibyte_mmu040 (int o)
+ {
+ 	uae_u32 pc = m68k_getpci () + o;
+-	return uae_mmu040_get_iword (pc);
++	uae_u32 v = uae_mmu040_get_iword (pc);
++	UISA_LOG(UISA_LOG_IFETCH, pc, 2, v & 0xffff);
++	return v;
+ }
  STATIC_INLINE uae_u32 get_iword_mmu040 (int o)
  {
  	uae_u32 pc = m68k_getpci () + o;
