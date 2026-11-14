@@ -311,7 +311,7 @@ def length(op):
     i = decode(op)
     m, sz = i.mnem, i.size
     exact = not (i.src in INDEXED or i.dst in INDEXED)
-    fixed = {"MOVEP": 4, "CAS2": 6, "MOVEC": 4, "RTD": 4, "STOP": 4, "PACK": 4, "UNPK": 4,
+    fixed = {"MOVEP": 4, "CAS2": 6, "MOVEC": 4, "RTD": 4, "STOP": 4, "PACK": 4, "UNPK": 4, "TRAP": 2, "BKPT": 2,
              "PFLUSH": 2, "PTEST": 2, "CINV": 2, "CPUSH": 2}
     if m in fixed:
         return fixed[m], True

@@ -10,7 +10,7 @@ struct Insn {
   const char *name;
   uint16_t op;
   uisa_m68k_state pre, post;
-  struct { int kind, size; uint32_t addr, value; } log[8];
+  struct { int kind, size; uint32_t addr, value; } log[12];
   int expect;   // 0 = match, otherwise the report column expected to count it
 };
 
@@ -92,9 +92,52 @@ int main() {
     t.post.r[0] = 0xaaaa2715;
     run(t);
   }
-  {  // MOVE.W SR,D0 in user mode: privilege violation (raised, not compared)
-    Insn t{"move.w sr,d0 (user)", 0x40c1, st(0x980, 0x0000), st(0x1000, 0x2000), {}, 12};
+  {  // MOVE.W SR,D1 in user mode: privilege violation, format 0 frame on the ISP
+    Insn t{"move.w sr,d1 (user)", 0x40c1, st(0x980, 0x0000), st(0x5000, 0x2000),
+           {{UISA_LOG_READ, 4, 0x1020, 0x5000}, {UISA_LOG_WRITE, 2, 0x7ff8, 0x0000}, {UISA_LOG_WRITE, 4, 0x7ffa, 0x980},
+            {UISA_LOG_WRITE, 2, 0x7ffe, 0x0020}}, 0};
+    t.pre.r[15] = 0x4000; t.pre.ctl[UISA_CTL_ISP] = 0x8000; t.pre.ctl[UISA_CTL_VBR] = 0x1000;
+    t.post.r[15] = 0x7ff8; t.post.ctl[UISA_CTL_USP] = 0x4000; t.post.ctl[UISA_CTL_VBR] = 0x1000;
     run(t);
+  }
+  {  // TRAP #3 from user mode: stacks the next PC, vector 35
+    Insn t{"trap #3", 0x4e43, st(0x1200, 0x001f), st(0x6000, 0x201f),
+           {{UISA_LOG_READ, 4, 0x108c, 0x6000}, {UISA_LOG_WRITE, 2, 0x7ff8, 0x001f}, {UISA_LOG_WRITE, 4, 0x7ffa, 0x1202},
+            {UISA_LOG_WRITE, 2, 0x7ffe, 0x008c}}, 0};
+    t.pre.r[15] = 0x4000; t.pre.ctl[UISA_CTL_ISP] = 0x8000; t.pre.ctl[UISA_CTL_VBR] = 0x1000;
+    t.post.r[15] = 0x7ff8; t.post.ctl[UISA_CTL_USP] = 0x4000; t.post.ctl[UISA_CTL_VBR] = 0x1000;
+    run(t);
+  }
+  {  // TRAPV with V set (supervisor): format 2 frame with the instruction address
+    Insn t{"trapv", 0x4e76, st(0x1300, 0x2702), st(0x6100, 0x2702),
+           {{UISA_LOG_READ, 4, 0x101c, 0x6100}, {UISA_LOG_WRITE, 2, 0x7ff4, 0x2702}, {UISA_LOG_WRITE, 4, 0x7ff6, 0x1302},
+            {UISA_LOG_WRITE, 2, 0x7ffa, 0x201c}, {UISA_LOG_WRITE, 4, 0x7ffc, 0x1300}}, 0};
+    t.pre.r[15] = 0x8000; t.pre.ctl[UISA_CTL_VBR] = 0x1000;
+    t.post.r[15] = 0x7ff4; t.post.ctl[UISA_CTL_VBR] = 0x1000;
+    run(t);
+  }
+  {  // TRAPEQ.W #imm with Z clear: no trap
+    Insn t{"trapeq.w", 0x57fa, st(0x1380, 0x2700), st(0x1384, 0x2700), {{UISA_LOG_IFETCH, 2, 0x1382, 0x1234}}, 0};
+    run(t);
+  }
+  {  // RTE format 0 to user mode: pops 8 bytes, switches to the USP
+    Insn t{"rte (format 0)", 0x4e73, st(0x1400, 0x2700), st(0x2222, 0x0004),
+           {{UISA_LOG_READ, 2, 0x7ff8, 0x0004}, {UISA_LOG_READ, 4, 0x7ffa, 0x2222}, {UISA_LOG_READ, 2, 0x7ffe, 0x0080}}, 0};
+    t.pre.r[15] = 0x7ff8; t.pre.ctl[UISA_CTL_USP] = 0x4000;
+    t.post.r[15] = 0x4000; t.post.ctl[UISA_CTL_USP] = 0x4000; t.post.ctl[UISA_CTL_ISP] = 0x8000;
+    run(t);
+  }
+  {  // RTE format 7 (access error): pops 60 bytes and restarts the instruction
+    Insn t{"rte (format 7)", 0x4e73, st(0x1500, 0x2700), st(0x3330, 0x2000),
+           {{UISA_LOG_READ, 2, 0x7000, 0x2000}, {UISA_LOG_READ, 4, 0x7002, 0x3330}, {UISA_LOG_READ, 2, 0x7006, 0x7008},
+            {UISA_LOG_READ, 2, 0x700c, 0x0125}}, 0};
+    t.pre.r[15] = 0x7000; t.post.r[15] = 0x703c;
+    // the same opword, so count a second match
+    uisa_shadow_pre(t.op, &t.pre);
+    for (auto &l : t.log)
+      if (l.size) uisa_shadow_log(l.kind, l.addr, l.size, l.value);
+    uisa_shadow_post(&t.post);
+    if (uisa_shadow_count(t.op, 0) != 2) { printf("FAIL: %s\n", t.name); fails++; }
   }
   {  // MOVE.W #$0000,SR: supervisor -> user switches A7 to the USP
     Insn t{"move.w #0,sr", 0x46fc, st(0xa00, 0x2704), st(0xa04, 0x0000), {{UISA_LOG_IFETCH, 2, 0xa02, 0x0000}}, 0};

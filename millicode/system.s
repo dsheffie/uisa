@@ -115,9 +115,9 @@ set_sr:
         and     x11, x10, x12
         xor     x13, x11, gsr
         andi    x13, x13, 0x1000        ; changing M: not handled yet
-        b.ne    x13, x0, unsupported
+        b.ne    x13, x0, set_sr_m
         andi    x15, gsr, 0x1000        ; M = 1 (master stack): not handled yet
-        b.ne    x15, x0, unsupported
+        b.ne    x15, x0, set_sr_m
         andi    x13, gsr, 0x2000        ; old S
         andi    x14, x11, 0x2000        ; new S
         b.eq    x13, x14, set_sr_done
@@ -131,6 +131,8 @@ set_sr_user:
 set_sr_done:
         add     gsr, x11, x0
         ret
+set_sr_m:
+        brk     10
 
 ; ---------------------------------------------------------------------------
 ; ORI / ANDI / EORI #imm to CCR (byte) or SR (word, privileged)

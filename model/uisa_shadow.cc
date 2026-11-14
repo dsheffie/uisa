@@ -47,7 +47,7 @@ enum {
   R_FULL_EXT,           // full-format extension word: not modelled yet
   R_UNSUPPORTED_UOP,    // a uop or addressing form the model cannot run
   R_MC_UNHANDLED,       // millicode reached brk: a form its routine does not handle yet
-  R_EXCEPTION,          // the model raised a guest exception (not compared yet)
+  R_EXCEPTION,          // unused (exceptions are now modelled and compared)
   R_NATIVE,             // millicode operation with no routine yet (not compared)
   R_ABORTED,            // pre without post: the host took a fault mid-instruction
   R_NUM
@@ -73,6 +73,7 @@ bool log_overflow;
 OpStats stats[65536];
 uint64_t kind_totals[K_NUM];
 uint64_t mc_insns_total, seq_uops_total;
+uint64_t exc_counts[256];   // exceptions the model took, by vector
 std::vector<std::string> details;
 const size_t MAX_DETAILS = 4000;
 int details_per_op[65536];
@@ -110,6 +111,7 @@ struct Machine {
   uint32_t cur_pc = 0, next_pc = 0;
   std::vector<uint32_t> cstack;
   bool done = false, raised = false;
+  uint32_t vector = 0;
   uint32_t mc_insns = 0;
 
   void failf(int r, const char *fmt = nullptr, uint32_t v = 0) {
@@ -251,6 +253,16 @@ struct Machine {
   }
 
   // ---- millicode -----------------------------------------------------------
+  // Enter the exception entry point (spec entry `exception`).
+  void raise(uint32_t vec) {
+    raised = true;
+    vector = vec;
+    R[1] = vec;
+    R[2] = R[G_PC];
+    R[3] = gpc_insn;
+    R[4] = 0;
+    cstack.clear();
+  }
   void run_millicode(uint32_t entry, int ilen) {
     R[1] = cur_op;
     R[2] = (ext16_or_zero(2) << 16) | ext16_or_zero(4);
@@ -267,14 +279,19 @@ struct Machine {
       if (d.op == UISA_ILLEGAL) { failf(R_UNSUPPORTED_UOP, "illegal millicode word at %08x", mpc); return; }
       if (d.op == UISA_GEXIT) { done = true; return; }
       if (d.op == UISA_GFAULT || d.op == UISA_GFAULTR) {
-        raised = true;
-        done = true;
-        char b[48];
-        snprintf(b, sizeof b, "vector %u", d.op == UISA_GFAULT ? d.imm : R[d.rs1]);
+        uint32_t vec = d.op == UISA_GFAULT ? d.imm : R[d.rs1];
+        if (raised) { failf(R_UNSUPPORTED_UOP, "exception %u during exception entry", vec); return; }
+        raise(vec);
+        mpc = MC_BASE + MC_EP_EXCEPTION;
+        continue;
+      }
+      if (d.op == UISA_BRK || d.op == UISA_HALT) {
+        char b[64];
+        snprintf(b, sizeof b, "brk %u at millicode %08x", d.imm, mpc);
+        failf(R_MC_UNHANDLED);
         why = b;
         return;
       }
-      if (d.op == UISA_BRK || d.op == UISA_HALT) { failf(R_MC_UNHANDLED, "brk at millicode %08x", mpc); return; }
       if ((o.is_load || o.is_store) && d.sp == 0) { failf(R_UNSUPPORTED_UOP, "hidden-memory access at %08x", mpc); return; }
       uisa_fuop u = {(uint16_t)d.op, d.rd, d.rs1, d.rs2, IK_CONST, 0, (int32_t)d.imm};
       cur_pc = mpc;
@@ -439,7 +456,7 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
     model_pc = m.R[G_PC];
   }
   if (m.fail != R_MATCH) { note(m.fail, m, *post, model_pc); return; }
-  if (m.raised) { note(R_EXCEPTION, m, *post, model_pc); return; }
+  if (m.raised) exc_counts[m.vector & 0xff]++;
 
   int result = R_MATCH;
   for (int i = 0; i < 16 && result == R_MATCH; i++)
@@ -465,6 +482,15 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
       if (!m.writes.empty() && !host.empty() && m.writes.begin()->first != host.begin()->first) {
         snprintf(b, sizeof b, "; first byte model @%08x host @%08x", m.writes.begin()->first, host.begin()->first);
         m.why += b;
+      } else {
+        for (auto &w : m.writes) {
+          auto h = host.find(w.first);
+          if (h != host.end() && h->second != w.second) {
+            snprintf(b, sizeof b, "; @%08x model %02x host %02x", w.first, w.second, h->second);
+            m.why += b;
+            break;
+          }
+        }
       }
     }
   }
@@ -482,7 +508,10 @@ void uisa_shadow_dump(void) {
   for (int k = 0; k < K_NUM; k++) fprintf(f, " %s=%llu", kn[k], (unsigned long long)kind_totals[k]);
   fprintf(f, "\n# millicode instructions executed: %llu; sequencer uops: %llu\n",
           (unsigned long long)mc_insns_total, (unsigned long long)seq_uops_total);
-  fprintf(f, "# opword count");
+  fprintf(f, "# exceptions taken by vector:");
+  for (int v = 0; v < 256; v++)
+    if (exc_counts[v]) fprintf(f, " %d=%llu", v, (unsigned long long)exc_counts[v]);
+  fprintf(f, "\n# opword count");
   for (int r = 0; r < R_NUM; r++) fprintf(f, " %s", R_NAMES[r]);
   fprintf(f, "\n");
   for (int op = 0; op < 65536; op++) {

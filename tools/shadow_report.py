@@ -24,8 +24,8 @@ def main():
         for line in f:
             if line.startswith("# kinds:"):
                 kinds = line[len("# kinds:"):].strip()
-            elif line.startswith("# millicode"):
-                extra = line[2:].strip()
+            elif line.startswith("# millicode") or line.startswith("# exceptions"):
+                extra += ("\n" if extra else "") + line[2:].strip()
             elif line.startswith("# opword"):
                 cols = line[2:].split()[2:]
             elif line.startswith("! "):

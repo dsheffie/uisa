@@ -5,6 +5,7 @@ Writes build/uisa_millicode.inc for the shadow model:
   MC_BASE            hidden-memory address of the image
   MC_IMAGE[]         the assembled words
   MC_ENTRY[65536]    per opword: byte offset of its routine, or -1
+  MC_EP_<NAME>       byte offset of each spec entry point's routine, or -1
 """
 
 import os
@@ -55,6 +56,13 @@ def main():
     for i in range(0, 65536, 32):
         o.append("  " + ",".join(str(x) for x in entry[i:i + 32]) + ",")
     o.append("};")
+    eps = {e["name"] for e in spec.d["entry_points"]}
+    for name, label in (d.get("entries") or {}).items():
+        if name not in eps:
+            sys.exit("dispatch: %r is not a spec entry point" % name)
+        if label not in labels:
+            sys.exit("dispatch: no label %r for entry %r" % (label, name))
+        o.append("static const int32_t MC_EP_%s = %d;" % (name.upper(), labels[label] - base))
     with open(os.path.join(ROOT, "build", "uisa_millicode.inc"), "w") as f:
         f.write("\n".join(o) + "\n")
     print("millicode: %d words; handlers for %s" % (len(words), ", ".join(

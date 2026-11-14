@@ -1,8 +1,11 @@
 # Which millicode routine handles each 68k operation that spec/flows.yaml
 # sends to millicode (keys are flows.yaml's millicode op names).
 # Operations without an entry still run natively in the shadow model.
-sources: [system.s, ea.s, integer.s]
+sources: [system.s, ea.s, integer.s, exception.s]
 base: 0x0
+# Labels for the spec's entry points (spec/uisa.yaml entry_points).
+entries:
+  exception: exception
 handlers:
   "MOVE to/from SR, CCR, USP": move_sr
   "ORI/ANDI/EORI to CCR, SR": logic_sr
@@ -15,3 +18,9 @@ handlers:
   BFEXTU: bitfield
   BFEXTS: bitfield
   BFFFO: bitfield
+  TRAP: trap
+  TRAPV: trapv
+  TRAPcc: trapcc
+  ILLEGAL: illegal_insn
+  LINE-A: line_a
+  RTE: rte

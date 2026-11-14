@@ -764,8 +764,8 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 **exception**: Guest exception raised by a guest access fault, gfault, or a decode-time condition (illegal, privilege, line A/F).
 
 - `x1`: vector number
-- `x2`: guest PC to stack
-- `x3`: fault address (access errors)
+- `x2`: guest PC to stack (gpc when raised)
+- `x3`: address of the instruction that raised it (format 2 frames); fault address for access errors
 - `x4`: fault status (access errors)
 
 **interrupt**: Taken at a guest instruction boundary when the pending level exceeds the SR mask.

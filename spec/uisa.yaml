@@ -750,7 +750,7 @@ entry_points:
     regs: {x1: "opword (zero-extended)", x2: "extension words 0:1 (word 0 in bits 31:16)", x3: "extension words 2:3", x4: "address of the next sequential guest instruction"}
   - name: exception
     desc: "Guest exception raised by a guest access fault, gfault, or a decode-time condition (illegal, privilege, line A/F)."
-    regs: {x1: "vector number", x2: "guest PC to stack", x3: "fault address (access errors)", x4: "fault status (access errors)"}
+    regs: {x1: "vector number", x2: "guest PC to stack (gpc when raised)", x3: "address of the instruction that raised it (format 2 frames); fault address for access errors", x4: "fault status (access errors)"}
   - name: interrupt
     desc: "Taken at a guest instruction boundary when the pending level exceeds the SR mask."
     regs: {x1: "interrupt level"}
