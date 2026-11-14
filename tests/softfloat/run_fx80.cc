@@ -21,9 +21,10 @@ extern "C" {
 struct Entry { const char *name; int start; };
 #include "fx80_image.inc"   // FX80_IMAGE[], FX80_WORDS, FX80_ENTRIES[]
 
-enum Op { ADD, SUB, MUL, DIV, SQRT, MOVE, FROM_I32, TO_I32, NOPS };
+enum Op { ADD, SUB, MUL, DIV, SQRT, MOVE, FROM_I32, TO_I32, SGLMUL, SGLDIV, ABS, NEG, CMP, TST, NOPS };
 static const char *opName[NOPS] = {"fx80_add", "fx80_sub", "fx80_mul", "fx80_div",
-                                   "fx80_sqrt", "fx80_move", "fx80_from_i32", "fx80_to_i32"};
+                                   "fx80_sqrt", "fx80_move", "fx80_from_i32", "fx80_to_i32",
+                                   "fx80_sglmul", "fx80_sgldiv", "fx80_abs", "fx80_neg", "fx80_cmp", "fx80_tst"};
 
 static std::mt19937_64 rng(20261114);
 static uint64_t r64() { return rng(); }
@@ -61,6 +62,19 @@ static floatx80 pickX(const floatx80 *near) {
   return x;
 }
 
+// On a 68040 Previous traps denormal and unnormal operands (unimplemented
+// data type) before any arithmetic, except unnormal zeros, which become
+// zeros (fpp.c normalize_or_fault_if_no_denormal_support). FSGLDIV has no
+// invalid-encoding check and its correction loops can run for millions of
+// iterations on such inputs, so the single-precision operations get only
+// operands that can reach them.
+static void reachable(floatx80 &x) {
+  int e = x.high & 0x7FFF;
+  if (e == 0x7FFF || (x.low >> 63)) return;
+  if (x.low == 0) x.high &= 0x8000;
+  else x.low |= 0x8000000000000000ull, x.high = (uint16_t)((x.high & 0x8000) | (e ? e : 1));
+}
+
 static int32_t pickI32() {
   static const int32_t sp[] = {0, 1, -1, 2, 0x7FFFFFFF, (int32_t)0x80000000, 0x40000000, -0x40000000, 3, 1000000};
   if (r64() % 3 == 0) return sp[r64() % 10];
@@ -92,7 +106,14 @@ int main(int argc, char **argv) {
         b.high &= 0x8000;
         b.low = r64() >> (r64() % 64);
       }
-      if (r64() % 2 && (op == ADD || op == SUB || op == MUL || op == DIV) && r64() % 8 == 0) std::swap(a, b);
+      if (r64() % 2 && (op == ADD || op == SUB || op == MUL || op == DIV || op == SGLMUL || op == SGLDIV || op == CMP) &&
+          r64() % 8 == 0)
+        std::swap(a, b);
+      if (op == CMP && r64() % 4 == 0) b = a;   // equal operands
+      if (op == SGLMUL || op == SGLDIV) {   // only what reaches them on a 68040 (see reachable())
+        reachable(a);
+        reachable(b);
+      }
       int32_t ia = pickI32();
       int mode = (int)(r64() % 4), prec = precs[r64() % 3];
       // Previous
@@ -110,6 +131,12 @@ int main(int argc, char **argv) {
         case MOVE: z = floatx80_move(a, &fs); break;
         case FROM_I32: z = int32_to_floatx80(ia); break;
         case TO_I32: zi = floatx80_to_int32(a, &fs); break;
+        case SGLMUL: z = floatx80_sglmul(a, b, &fs); break;
+        case SGLDIV: z = floatx80_sgldiv(a, b, &fs); break;
+        case ABS: z = floatx80_abs(a, &fs); break;
+        case NEG: z = floatx80_neg(a, &fs); break;
+        case CMP: z = floatx80_cmp(a, b, &fs); break;
+        case TST: z = floatx80_tst(a, &fs); break;
       }
       // millicode
       Machine m;

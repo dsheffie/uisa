@@ -46,3 +46,9 @@ entry void fx80_sqrt(void) { float_status s; initStatus(s); done(floatx80_sqrt(a
 entry void fx80_move(void) { float_status s; initStatus(s); done(floatx80_move(argA(), s), s); }
 entry void fx80_from_i32(void) { float_status s; initStatus(s); done(int32_to_floatx80((int32_t)__rdg(D0)), s); }
 entry void fx80_to_i32(void) { float_status s; initStatus(s); doneInt(floatx80_to_int32(argA(), s), s); }
+entry void fx80_sglmul(void) { float_status s; initStatus(s); done(floatx80_sglmul(argA(), argB(), s), s); }
+entry void fx80_sgldiv(void) { float_status s; initStatus(s); done(floatx80_sgldiv(argA(), argB(), s), s); }
+entry void fx80_abs(void) { float_status s; initStatus(s); done(floatx80_abs(argA(), s), s); }
+entry void fx80_neg(void) { float_status s; initStatus(s); done(floatx80_neg(argA(), s), s); }
+entry void fx80_cmp(void) { float_status s; initStatus(s); done(floatx80_cmp(argA(), argB(), s), s); }
+entry void fx80_tst(void) { float_status s; initStatus(s); done(floatx80_tst(argA(), s), s); }
