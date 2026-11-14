@@ -12,7 +12,7 @@ offset of the extension word from the instruction's address:
   {d16@k} {d8@k} {abs.W@k} {abs.L@k}   addressing-mode displacements/addresses
   {imm.B@k} {imm.W@k} {imm.L@k}          immediates
   {br.W@k} {br.L@k}                      branch displacement + 2 (relative to the instruction)
-  {pc16@k}                               PC-relative: k + displacement
+  {pc16@k} {pc8@k}                       PC-relative: k + displacement (16-bit, or the brief format's 8-bit)
   {xn@k}                                 index register named by a brief extension word
 """
 
@@ -33,7 +33,7 @@ FLOWS_PATH = os.path.join(HERE, "..", "spec", "flows.yaml")
 CC_NAMES = [c.lower() for c in m68kdec.CC]
 SIZE_BITS = {"B": 8, "W": 16, "L": 32}
 SAMPLE = {"d16": "8", "d8": "4", "abs.W": "64", "abs.L": "64", "imm.B": "5", "imm.W": "5",
-          "imm.L": "5", "br.W": "6", "br.L": "6", "pc16": "6", "xn": "d1"}
+          "imm.L": "5", "br.W": "6", "br.L": "6", "pc16": "6", "pc8": "6", "xn": "d1"}
 RUNTIME = re.compile(r"\{([A-Za-z0-9.]+)@(\d+)\}")
 
 
@@ -151,7 +151,8 @@ class Expander:
         def sub(s):
             s = s.replace("{r}", str(r)).replace("{inc}", str(inc)).replace("{at}", at).replace("{s}", scratch)
             s = s.replace("{d16}", "{d16@%d}" % ext_off).replace("{d8}", "{d8@%d}" % ext_off)
-            s = s.replace("{abs}", "{%s@%d}" % (mode, ext_off)).replace("{pcd}", "{pc16@%d}" % ext_off)
+            s = s.replace("{abs}", "{%s@%d}" % (mode, ext_off)).replace("{pcd8}", "{pc8@%d}" % ext_off)
+            s = s.replace("{pcd}", "{pc16@%d}" % ext_off)
             s = s.replace("d1", "{xn@%d}" % ext_off) if "Xn" in mode else s
             return s
         if "reg" in spec:

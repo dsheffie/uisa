@@ -49,6 +49,7 @@ def facts(spec, v):
         gform=GFORMS.index(v.attrs.get("gform")), gfn=v.attrs.get("gfn", 0),
         gsize=spec.size_code.get(v.attrs.get("gsize"), 0) if v.kind == "guest" else 0,
         flags_on=int(bool(v.attrs.get("flags_on", False))),
+        wb={None: 0, "pre": 1, "post": 2}[v.attrs.get("writeback")],
     )
 
 
@@ -222,22 +223,23 @@ struct opinfo {
   bool flags_on;
   bool imm_signed;
   uint8_t imm_scale;
+  uint8_t wb;                // stores: 0 none, 1 pre (address = rs1 + imm), 2 post (address = rs1)
 };
 """)
     o.append("static const opinfo OPS[UISA_NUM_OPS] = {")
-    o.append('  {"illegal", 0, 0, FMT_R, 0,0,0,0, 0,0,0,0, 0,0, 0,0,0,0,0,0, 0, UNIT_ALU, CTI_NONE, GF_NONE, 0, 0, 0, 0, 1},')
+    o.append('  {"illegal", 0, 0, FMT_R, 0,0,0,0, 0,0,0,0, 0,0, 0,0,0,0,0,0, 0, UNIT_ALU, CTI_NONE, GF_NONE, 0, 0, 0, 0, 1, 0},')
     fmt_names = list(spec.formats)
     for v in vs:
         fa = facts(spec, v)
         signed, scale = spec.imm_info(v)
-        o.append('  {"%s", 0x%08xu, 0x%08xu, FMT_%s, %d,%d,%d,%d, %d,%d,%d,%d, %d,%d, %d,%d,%d,%d,%d,%d, %d, (unit_t)%d, (cti_t)%d, (gform_t)%d, %d, %d, %d, %d, %d},' % (
+        o.append('  {"%s", 0x%08xu, 0x%08xu, FMT_%s, %d,%d,%d,%d, %d,%d,%d,%d, %d,%d, %d,%d,%d,%d,%d,%d, %d, (unit_t)%d, (cti_t)%d, (gform_t)%d, %d, %d, %d, %d, %d, %d},' % (
             v.mnemonic, v.mask, v.match, v.fmt.name,
             fa["reads_rs1"], fa["reads_rs2"], fa["reads_rd"], fa["writes_rd"],
             fa["reads_nzvc"], fa["reads_x"], fa["writes_nzvc"], fa["writes_x"],
             fa["serialize"], fa["tied"], fa["is_load"], fa["is_store"], fa["is_probe"],
             fa["lock_begin"], fa["lock_end"], fa["load_signed"], fa["mem_bytes"],
             fa["unit"], fa["cti"], fa["gform"], fa["gfn"], v.attrs.get("gsize", 0) or 0,
-            fa["flags_on"], int(signed), scale))
+            fa["flags_on"], int(signed), scale, fa["wb"]))
     o.append("};")
     o.append("")
     # field extraction per format

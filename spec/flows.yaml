@@ -48,7 +48,7 @@ ea_modes:
   "abs.W":      {base: "x0", disp: "{abs}"}
   "abs.L":      {base: "x0", disp: "{abs}"}
   "(d16,PC)":   {pre: ["gpcaddi {at}, {pcd}"], base: "{at}", disp: "0"}
-  "(d8,PC,Xn)": {pre: ["gpcaddi {at}, {pcd}", "sext16 {s}, d1", "sh2add {at}, {at}, {s}"], base: "{at}", disp: "0"}
+  "(d8,PC,Xn)": {pre: ["gpcaddi {at}, {pcd8}", "sext16 {s}, d1", "sh2add {at}, {at}, {s}"], base: "{at}", disp: "0"}
   "#imm":       {imm: true}
   "#q":         {imm: true}
 
