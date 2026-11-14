@@ -56,6 +56,9 @@ struct Machine {
 #define CSTACK_POP() cstack_pop()
 #define GSTORE(sp, addr, n, v) (void)0
 #define GDATA 1
+#define MMU_FLUSH(addr, how) ((void)(addr))
+#define CACHE_OP(addr, how, push) ((void)(addr))
+#define MMU_PTEST(addr, how) ((void)(addr), 0u)
     switch (d.op) {
 #include "uisa_sem.inc"
       default:

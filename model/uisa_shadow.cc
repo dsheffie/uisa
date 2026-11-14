@@ -116,6 +116,7 @@ struct Machine {
   std::vector<uint32_t> cstack;
   bool done = false, raised = false;
   uint32_t vector = 0;
+  uint32_t oracle_mmusr = 0;   // the host's MMUSR after the instruction (PTEST result)
   uint32_t mc_insns = 0;
 
   void failf(int r, const char *fmt = nullptr, uint32_t v = 0) {
@@ -235,6 +236,12 @@ struct Machine {
 #define CSTACK_POP() cstack_pop()
 #define GSTORE(sp, addr, n, v) store((addr), (n), (v))
 #define GDATA 1
+// No ATC or caches in the functional model: flushes have no visible effect,
+// and PTEST's table walk is the hardware walker's, so its result comes from
+// the host (the shadow checks the millicode around it, not the walk).
+#define MMU_FLUSH(addr, how) ((void)(addr))
+#define CACHE_OP(addr, how, push) ((void)(addr))
+#define MMU_PTEST(addr, how) ((void)(addr), oracle_mmusr)
     switch (u.op) {
 #include "uisa_sem.inc"
     default:
@@ -447,6 +454,7 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
 
   Machine m;
   setup(m);
+  m.oracle_mmusr = post->ctl[UISA_CTL_MMUSR];
   int ilen = FLOW_ILEN[cur_op];
   uint32_t model_pc;
   if (kind == K_PLA) {

@@ -498,6 +498,39 @@ int main() {
     t.post.r[1] = 0xfabfffff; t.post.r[3] = 0x1ab;
     run(t);
   }
+  {  // TAS D2: byte 0x00 -> Z set, then 0x80
+    Insn t{"tas d2", 0x4ac2, st(0x1c00, 0x271f), st(0x1c02, 0x2714), {}, 0};
+    t.pre.r[2] = 0x12345600; t.post.r[2] = 0x12345680;
+    run(t);
+  }
+  {  // TAS (A0)+: locked read-modify-write, N set
+    Insn t{"tas (a0)+", 0x4ad8, st(0x1d00, 0x2700), st(0x1d02, 0x2708),
+           {{UISA_LOG_READ, 1, 0x3000, 0x81}, {UISA_LOG_WRITE, 1, 0x3000, 0x81}}, 0};
+    t.pre.r[8] = 0x3000; t.post.r[8] = 0x3001;
+    run(t);
+  }
+  {  // CPUSHA both caches: no visible effect
+    Insn t{"cpusha bc", 0xf4f8, st(0x1e00, 0x2700), st(0x1e02, 0x2700), {}, 0};
+    run(t);
+  }
+  {  // PFLUSH (A1)
+    Insn t{"pflush (a1)", 0xf509, st(0x1e80, 0x2700), st(0x1e82, 0x2700), {}, 0};
+    t.pre.r[9] = 0x4000; t.post.r[9] = 0x4000;
+    run(t);
+  }
+  {  // PTESTR (A2): MMUSR from the table walker (the host)
+    Insn t{"ptestr (a2)", 0xf56a, st(0x1f00, 0x2700), st(0x1f02, 0x2700), {}, 0};
+    t.pre.r[10] = 0x5000; t.post.r[10] = 0x5000; t.post.ctl[UISA_CTL_MMUSR] = 0x00123419;
+    run(t);
+  }
+  {  // CPUSHA in user mode: privilege violation
+    Insn t{"cpusha (user)", 0xf4f9, st(0x1f80, 0x0000), st(0x5000, 0x2000),
+           {{UISA_LOG_READ, 4, 0x1020, 0x5000}, {UISA_LOG_WRITE, 2, 0x7ff8, 0x0000}, {UISA_LOG_WRITE, 4, 0x7ffa, 0x1f80},
+            {UISA_LOG_WRITE, 2, 0x7ffe, 0x0020}}, 0};
+    t.pre.r[15] = 0x4000; t.pre.ctl[UISA_CTL_ISP] = 0x8000; t.pre.ctl[UISA_CTL_VBR] = 0x1000;
+    t.post.r[15] = 0x7ff8; t.post.ctl[UISA_CTL_USP] = 0x4000; t.post.ctl[UISA_CTL_VBR] = 0x1000;
+    run(t);
+  }
   fails += random_divl(20000);
   fails += random_divw(20000);
   fails += random_bfwrite(20000);

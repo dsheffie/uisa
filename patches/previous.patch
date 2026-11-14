@@ -18,7 +18,7 @@ index 31e9fc4..4c076ba 100644
  if(ENABLE_OSX_BUNDLE)
  	set(GUIOSX_SOURCES
 diff --git a/previous-code/src/cpu/cpummu.h b/previous-code/src/cpu/cpummu.h
-index 6dd9e35..3271355 100644
+index 6dd9e35..2079de5 100644
 --- a/previous-code/src/cpu/cpummu.h
 +++ b/previous-code/src/cpu/cpummu.h
 @@ -206,12 +206,13 @@ extern void REGPARAM3 dfc_put_long(uaecptr addr, uae_u32 val) REGPARAM;
@@ -123,7 +123,44 @@ index 6dd9e35..3271355 100644
  }
  // normal 060
  STATIC_INLINE void put_byte_mmu060 (uaecptr addr, uae_u32 v)
-@@ -970,29 +1020,39 @@ STATIC_INLINE uae_u32 get_lrmw_long_mmu040 (uaecptr addr)
+@@ -945,54 +995,73 @@ STATIC_INLINE uae_u32 get_rmw_long_mmu060 (uaecptr addr)
+ STATIC_INLINE void put_lrmw_byte_mmu040 (uaecptr addr, uae_u32 v)
+ {
+ 	uae_mmu_put_lrmw (addr, v, sz_byte, 0);
++	UISA_LOG(UISA_LOG_WRITE, addr, 1, v & 0xff);
+ }
+ STATIC_INLINE void put_lrmw_word_mmu040 (uaecptr addr, uae_u32 v)
+ {
+ 	uae_mmu_put_lrmw (addr, v, sz_word, 0);
++	UISA_LOG(UISA_LOG_WRITE, addr, 2, v & 0xffff);
+ }
+ STATIC_INLINE void put_lrmw_long_mmu040 (uaecptr addr, uae_u32 v)
+ {
+ 	uae_mmu_put_lrmw (addr, v, sz_long, 0);
++	UISA_LOG(UISA_LOG_WRITE, addr, 4, v);
+ }
+ STATIC_INLINE uae_u32 get_lrmw_byte_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu_get_lrmw (addr, sz_byte, 0);
++	uae_u32 v = uae_mmu_get_lrmw (addr, sz_byte, 0);
++	UISA_LOG(UISA_LOG_READ, addr, 1, v & 0xff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_lrmw_word_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu_get_lrmw (addr, sz_word, 0);
++	uae_u32 v = uae_mmu_get_lrmw (addr, sz_word, 0);
++	UISA_LOG(UISA_LOG_READ, addr, 2, v & 0xffff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_lrmw_long_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu_get_lrmw (addr, sz_long, 0);
++	uae_u32 v = uae_mmu_get_lrmw (addr, sz_long, 0);
++	UISA_LOG(UISA_LOG_READ, addr, 4, v);
++	return v;
+ }
+ 
  STATIC_INLINE uae_u32 get_ibyte_mmu040 (int o)
  {
  	uae_u32 pc = m68k_getpci () + o;
