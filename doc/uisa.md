@@ -170,7 +170,7 @@ GitHub; commit it together with the spec change that produced it.
 
 # Reference (generated)
 
-Spec version **0.1-draft**. 658 concrete instruction variants.
+Spec version **0.1-draft**. 659 concrete instruction variants.
 
 ## Parameters
 
@@ -312,6 +312,7 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `bfextui` | BFI | BFI fn=0 | rd, rs1, off, wid | `r = BF_EXTU(a, b);` |  |
 | `bfextsi` | BFI | BFI fn=1 | rd, rs1, off, wid | `r = BF_EXTS(a, b);` |  |
 | `bfinsi` | BFI | BFI fn=2 | rd, rs1, off, wid | `r = BF_INS(OLD, a, b);` | Insert the low wid bits of rs1 into the field of rd. rd is also a source (old value), so the op reads rd and rs1. |
+| `bx` | BFI | BFI fn=3 | rs1, off, wid | `npc = pc + 4 + (((a >> BF_OFF(b)) & ((1u << BF_WID(b)) - 1u)) << 2);` | Indexed branch (n-way dispatch): take the wid-bit field of rs1 starting at bit off (counted from the LSB here, 1 <= wid <= 15) as an index into a table of one-instruction slots that follows the bx, usually jal to each case. Predicted like an indirect jump. |
 | `gexit` | S | SYS fn=0 |  |  | End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc. |
 | `gfault` | S | SYS fn=1 | imm |  | Raise guest exception vector imm8. Transfers to the exception entry point. |
 | `gfaultr` | S | SYS fn=16 | rs1 |  | Raise the guest exception whose vector is in rs1 (TRAP #n, computed vectors). |

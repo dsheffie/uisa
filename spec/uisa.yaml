@@ -248,6 +248,7 @@ base_ops:
   - {name: bfextui, major: BFI, fn: 0, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, sem: "r = BF_EXTU(a, b);"}
   - {name: bfextsi, major: BFI, fn: 1, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, sem: "r = BF_EXTS(a, b);"}
   - {name: bfinsi,  major: BFI, fn: 2, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, reads_rd: true, sem: "r = BF_INS(OLD, a, b);", desc: "Insert the low wid bits of rs1 into the field of rd. rd is also a source (old value), so the op reads rd and rs1."}
+  - {name: bx,      major: BFI, fn: 3, fmt: BFI, asm: [rs1, "off", wid], unit: br, cti: jump_ind, sem: "npc = pc + 4 + (((a >> BF_OFF(b)) & ((1u << BF_WID(b)) - 1u)) << 2);", desc: "Indexed branch (n-way dispatch): take the wid-bit field of rs1 starting at bit off (counted from the LSB here, 1 <= wid <= 15) as an index into a table of one-instruction slots that follows the bx, usually jal to each case. Predicted like an indirect jump."}
 
   # --- system (major SYS, fn selects; imm8 operand) ---
   - {name: gexit,   major: SYS, fn: 0,  fmt: S, asm: [], unit: sys, cti: gexit, desc: "End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc."}

@@ -37,50 +37,39 @@ cache:
         andi    x8, x1, 7
         addi    x8, x8, 8
         rdg     x6, x8                  ; address
-        andi    x7, x1, 0x18
-        b.eq    x7, x0, line_f          ; scope 0: not a cache instruction
-        andi    x7, x1, 0xc0
-        b.eq    x7, x0, exit            ; no caches selected: no operation
-        srli    x5, x1, 3
-        andi    x5, x5, 31              ; cache:push:scope
-
-        addi    x7, x0, 9
-        b.eq    x5, x7, cache_inv1_1
-        addi    x7, x0, 10
-        b.eq    x5, x7, cache_inv1_2
-        addi    x7, x0, 11
-        b.eq    x5, x7, cache_inv1_3
-        addi    x7, x0, 13
-        b.eq    x5, x7, cache_push1_1
-        addi    x7, x0, 14
-        b.eq    x5, x7, cache_push1_2
-        addi    x7, x0, 15
-        b.eq    x5, x7, cache_push1_3
-        addi    x7, x0, 17
-        b.eq    x5, x7, cache_inv2_1
-        addi    x7, x0, 18
-        b.eq    x5, x7, cache_inv2_2
-        addi    x7, x0, 19
-        b.eq    x5, x7, cache_inv2_3
-        addi    x7, x0, 21
-        b.eq    x5, x7, cache_push2_1
-        addi    x7, x0, 22
-        b.eq    x5, x7, cache_push2_2
-        addi    x7, x0, 23
-        b.eq    x5, x7, cache_push2_3
-        addi    x7, x0, 25
-        b.eq    x5, x7, cache_inv3_1
-        addi    x7, x0, 26
-        b.eq    x5, x7, cache_inv3_2
-        addi    x7, x0, 27
-        b.eq    x5, x7, cache_inv3_3
-        addi    x7, x0, 29
-        b.eq    x5, x7, cache_push3_1
-        addi    x7, x0, 30
-        b.eq    x5, x7, cache_push3_2
-        addi    x7, x0, 31
-        b.eq    x5, x7, cache_push3_3
-        jal     x0, illegal
+        bx      x1, 3, 5                ; cache:push:scope
+        jal     x0, line_f
+        jal     x0, exit
+        jal     x0, exit
+        jal     x0, exit
+        jal     x0, line_f
+        jal     x0, exit
+        jal     x0, exit
+        jal     x0, exit
+        jal     x0, line_f
+        jal     x0, cache_inv1_1
+        jal     x0, cache_inv1_2
+        jal     x0, cache_inv1_3
+        jal     x0, line_f
+        jal     x0, cache_push1_1
+        jal     x0, cache_push1_2
+        jal     x0, cache_push1_3
+        jal     x0, line_f
+        jal     x0, cache_inv2_1
+        jal     x0, cache_inv2_2
+        jal     x0, cache_inv2_3
+        jal     x0, line_f
+        jal     x0, cache_push2_1
+        jal     x0, cache_push2_2
+        jal     x0, cache_push2_3
+        jal     x0, line_f
+        jal     x0, cache_inv3_1
+        jal     x0, cache_inv3_2
+        jal     x0, cache_inv3_3
+        jal     x0, line_f
+        jal     x0, cache_push3_1
+        jal     x0, cache_push3_2
+        jal     x0, cache_push3_3
 cache_inv1_1:
         cinv    x6, 1
         jal     x0, exit

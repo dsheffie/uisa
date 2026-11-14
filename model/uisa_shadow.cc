@@ -74,6 +74,7 @@ OpStats stats[65536];
 uint64_t kind_totals[K_NUM];
 uint64_t mc_insns_total, seq_uops_total;
 uint64_t exc_counts[256];   // exceptions the model took, by vector
+uint64_t mc_prof[sizeof MC_IMAGE / sizeof MC_IMAGE[0]];   // executions per millicode word
 std::vector<std::string> details;
 const size_t MAX_DETAILS = 4000;
 int details_per_op[65536];
@@ -366,6 +367,7 @@ struct Machine {
     while (!done && fail == R_MATCH) {
       uint32_t i = (mpc - MC_BASE) / 4;
       if (i >= n_words || ++mc_insns > 10000) { failf(R_UNSUPPORTED_UOP, "millicode ran away at %08x", mpc); return; }
+      mc_prof[i]++;
       uint32_t w = MC_IMAGE[i];
       dec_t d = decode(w);
       const opinfo &o = OPS[d.op];
@@ -697,6 +699,8 @@ void uisa_shadow_dump(void) {
     for (int r = 0; r < R_NUM; r++) fprintf(f, " %llu", (unsigned long long)s.result[r]);
     fprintf(f, "\n");
   }
+  for (size_t i = 0; i < sizeof mc_prof / sizeof mc_prof[0]; i++)
+    if (mc_prof[i]) fprintf(f, "# mcprof %zx %llu\n", i * 4, (unsigned long long)mc_prof[i]);
   fprintf(f, "# details\n");
   for (const std::string &d : details) fprintf(f, "! %s\n", d.c_str());
   fclose(f);

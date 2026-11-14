@@ -11,15 +11,11 @@
 ; correct x4 for the extra length). Nests at most three calls deep.
 
 get_ext:
-        addi    x19, x0, 2
-        b.eq    x22, x19, get_ext2
-        addi    x19, x0, 4
-        b.eq    x22, x19, get_ext4
-        addi    x19, x0, 6
-        b.eq    x22, x19, get_ext6
-        addi    x19, x0, 8
-        b.eq    x22, x19, get_ext8
-        brk     3
+        bx      x22, 1, 2               ; offset 2, 4, 6, 8 -> slot 1, 2, 3, 0
+        jal     x0, get_ext8
+        jal     x0, get_ext2
+        jal     x0, get_ext4
+        jal     x0, get_ext6
 get_ext2:
         srli    x18, x2, 16
         ret
@@ -37,21 +33,15 @@ ea_addr:
         add     x26, x0, x0
         andi    x25, x20, 7
         addi    x25, x25, 8             ; An index for modes 2-6
-        srli    x16, x20, 3
-        andi    x16, x16, 7
-        addi    x17, x0, 2
-        b.eq    x16, x17, ea_ind
-        addi    x17, x0, 3
-        b.eq    x16, x17, ea_postinc
-        addi    x17, x0, 4
-        b.eq    x16, x17, ea_predec
-        addi    x17, x0, 5
-        b.eq    x16, x17, ea_d16
-        addi    x17, x0, 6
-        b.eq    x16, x17, ea_idx
-        addi    x17, x0, 7
-        b.eq    x16, x17, ea_mode7
+        bx      x20, 3, 3               ; mode
         brk     4                       ; Dn / An: not a memory operand
+        brk     4
+        jal     x0, ea_ind
+        jal     x0, ea_postinc
+        jal     x0, ea_predec
+        jal     x0, ea_d16
+        jal     x0, ea_idx
+        jal     x0, ea_mode7
 ea_ind:
         rdg     x23, x25
         ret
@@ -207,15 +197,15 @@ ea_full_done:
 ea_full_bad:
         brk     5                       ; reserved full-format encoding
 ea_mode7:
-        andi    x16, x20, 7
-        b.eq    x16, x0, ea_absw
-        addi    x17, x0, 1
-        b.eq    x16, x17, ea_absl
-        addi    x17, x0, 2
-        b.eq    x16, x17, ea_pc16
-        addi    x17, x0, 3
-        b.eq    x16, x17, ea_pcidx
+        bx      x20, 0, 3
+        jal     x0, ea_absw
+        jal     x0, ea_absl
+        jal     x0, ea_pc16
+        jal     x0, ea_pcidx
         brk     6                       ; #imm: not a memory operand
+        brk     6
+        brk     6
+        brk     6
 ea_absw:
         call    get_ext
         sext16  x23, x18

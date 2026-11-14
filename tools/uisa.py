@@ -342,6 +342,16 @@ class Spec:
         if not line:
             return None
         mnem, _, rest = line.partition(" ")
+        if mnem.lower() in ("extract", "extracts"):
+            # extract[s] rd, rs1, lsb, width: bfext[u|s]i counts its offset from the MSB
+            t = [x.strip() for x in rest.split(",")]
+            if len(t) != 4:
+                raise SpecError("%s expects rd, rs1, lsb, width" % mnem)
+            lsb, wid = self.num(t[2]), self.num(t[3])
+            if not (0 <= lsb < 32 and 1 <= wid <= 32 - lsb):
+                raise SpecError("%s: field %d:%d out of range" % (mnem, lsb, wid))
+            op = "bfextui" if mnem.lower() == "extract" else "bfextsi"
+            return self.assemble_line("%s %s, %s, %d, %d" % (op, t[0], t[1], (32 - lsb - wid) & 31, wid & 31), pc, labels)
         v = self.by_mnemonic.get(mnem.lower())
         if v is None:
             raise SpecError("unknown mnemonic %r" % mnem)
