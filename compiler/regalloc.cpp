@@ -26,6 +26,7 @@
  */
 #include <z3++.h>
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <set>
@@ -33,7 +34,10 @@
 #include "backend.h"
 #include "errors.h"
 
-static int moveCost(const std::map<std::pair<Reg *, Reg *>, int> &prefs, int *total) {
+using PairCmp = std::function<bool(const std::pair<Reg *, Reg *> &, const std::pair<Reg *, Reg *> &)>;
+using PrefMap = std::map<std::pair<Reg *, Reg *>, int, PairCmp>;
+
+static int moveCost(const PrefMap &prefs, int *total) {
   int missed = 0;
   if (total) *total = 0;
   for (auto &pw : prefs) {
@@ -44,7 +48,7 @@ static int moveCost(const std::map<std::pair<Reg *, Reg *>, int> &prefs, int *to
 }
 
 // Greedy preference-biased coloring; false if some value finds no register.
-static bool greedyAllocate(Program *p, AllocProblem &ap, const std::map<std::pair<Reg *, Reg *>, int> &prefs) {
+static bool greedyAllocate(Program *p, AllocProblem &ap, const PrefMap &prefs) {
   const int K = numColors();
   std::map<Reg *, std::vector<Reg *>> adj;
   for (auto &e : ap.edges) {
@@ -163,12 +167,17 @@ void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbo
   prm.set("rlimit", rlimit);
   opt.set(prm);
 
+  // everything below is keyed and ordered by a value's index in ap.vals,
+  // never by pointer, so z3 sees the same problem on every run
+  std::map<Reg *, int> idx;
+  for (Reg *v : ap.vals) idx[v] = (int)idx.size();
+  auto byIdx = [&](Reg *a, Reg *b) { return idx.at(a) < idx.at(b); };
   std::map<Reg *, std::vector<z3::expr>> B;
   for (Reg *v : ap.vals) {
     z3::expr_vector vs(c);
     std::vector<z3::expr> bits;
     for (int k = 1; k <= K; k++) {
-      z3::expr e = c.bool_const(("b" + std::to_string((size_t)v) + "_" + std::to_string(k)).c_str());
+      z3::expr e = c.bool_const(("b" + std::to_string(idx.at(v)) + "_" + std::to_string(k)).c_str());
       bits.push_back(e);
       vs.push_back(e);
     }
@@ -177,7 +186,13 @@ void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbo
     if (v->precolor >= 0) opt.add(bits[v->precolor - 1]);
     B.emplace(v, bits);
   }
-  for (auto &e : ap.edges)
+  std::vector<std::pair<Reg *, Reg *>> edges(ap.edges.begin(), ap.edges.end());
+  for (auto &e : edges)
+    if (byIdx(e.second, e.first)) std::swap(e.first, e.second);
+  std::sort(edges.begin(), edges.end(), [&](const std::pair<Reg *, Reg *> &x, const std::pair<Reg *, Reg *> &y) {
+    return idx.at(x.first) != idx.at(y.first) ? idx.at(x.first) < idx.at(y.first) : idx.at(x.second) < idx.at(y.second);
+  });
+  for (auto &e : edges)
     for (int k = 0; k < K; k++) opt.add(!B.at(e.first)[k] || !B.at(e.second)[k]);
 
   // used[g][r]: g, or a function it calls, writes x(r+1)
@@ -188,22 +203,27 @@ void allocateRegisters(Program *p, AllocProblem &ap, unsigned rlimit, bool verbo
     for (int k = 1; k <= K; k++) u.push_back(c.bool_const(("u_" + f->name + "_" + std::to_string(k)).c_str()));
     U.emplace(f, u);
   }
-  for (auto &fu : U) {
-    Function *f = fu.first;
+  for (Function *f : p->funcs) {   // program order, not pointer order
+    if (f->isEntry) continue;
     for (Reg *v : ap.fvals[f])
-      for (int k = 0; k < K; k++) opt.add(z3::implies(B.at(v)[k], fu.second[k]));
-    for (Function *g : f->callees)
-      for (int k = 0; k < K; k++) opt.add(z3::implies(U.at(g)[k], fu.second[k]));
+      for (int k = 0; k < K; k++) opt.add(z3::implies(B.at(v)[k], U.at(f)[k]));
+    std::vector<Function *> callees(f->callees.begin(), f->callees.end());
+    std::sort(callees.begin(), callees.end(), [](Function *a, Function *b) { return a->name < b->name; });
+    for (Function *g : callees)
+      for (int k = 0; k < K; k++) opt.add(z3::implies(U.at(g)[k], U.at(f)[k]));
   }
   for (auto &cs : ap.calls)
     for (Reg *v : cs.liveAcross)
       for (int k = 0; k < K; k++) opt.add(!U.at(cs.callee)[k] || !B.at(v)[k]);
 
   // soft: preferred pairs share a register
-  std::map<std::pair<Reg *, Reg *>, int> prefs;
+  PrefMap prefs([&](const std::pair<Reg *, Reg *> &x, const std::pair<Reg *, Reg *> &y) {
+    int a = idx.at(x.first), b = idx.at(y.first);
+    return a != b ? a < b : idx.at(x.second) < idx.at(y.second);
+  });
   for (auto &pr : ap.prefs) {
     if (pr.a == pr.b || !B.count(pr.a) || !B.count(pr.b)) continue;
-    auto key = pr.a < pr.b ? std::make_pair(pr.a, pr.b) : std::make_pair(pr.b, pr.a);
+    auto key = byIdx(pr.a, pr.b) ? std::make_pair(pr.a, pr.b) : std::make_pair(pr.b, pr.a);
     prefs[key] += pr.weight;
   }
   int n = 0;

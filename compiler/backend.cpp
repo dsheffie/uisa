@@ -289,9 +289,11 @@ static void computeLiveness(Function *f, FnLive &L) {
   }
 }
 
-static std::string names(const std::set<Reg *> &s) {
+static std::string names(const std::set<Reg *> &s) {   // in creation order, not pointer order
+  std::vector<Reg *> v(s.begin(), s.end());
+  std::sort(v.begin(), v.end(), [](Reg *a, Reg *b) { return a->id < b->id; });
   std::string r;
-  for (Reg *v : s) r += (r.empty() ? "" : ", ") + v->name;
+  for (Reg *x : v) r += (r.empty() ? "" : ", ") + x->name;
   return r;
 }
 
@@ -342,6 +344,7 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
           AllocProblem::CallSite cs{f, i->callee, {}, i->line};
           for (Reg *r : live)
             if (r != i->dst) cs.liveAcross.push_back(r);   // a CallRes result is defined after the call
+          std::sort(cs.liveAcross.begin(), cs.liveAcross.end(), [&](Reg *x, Reg *y) { return order[x] < order[y]; });
           ap.calls.push_back(cs);
           for (size_t k = 0; k < i->a.size() && k < i->callee->params.size(); k++)
             if (i->a[k].isReg()) ap.prefs.push_back({i->a[k].r, i->callee->params[k], w});
