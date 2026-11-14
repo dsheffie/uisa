@@ -304,7 +304,7 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `jal` | J | JAL | rd, imm | `r = pc + 4; npc = pc + b;` |  |
 | `jalr` | I | JALR | rd, rs1, imm | `r = pc + 4; npc = (a + b) & ~3u;` |  |
 | `call` | L | CALL | imm | `CSTACK_PUSH(pc + 4); npc = pc + b;` | Push the return address on the hardware millicode return stack. Overflow is a millicode fault. |
-| `b.<cc>` | B | BR cond=cc | rs1, rs2, imm | `if (COND) npc = pc + b;` | Compare two registers and branch. Millicode control flow; never reads guest flags. cc: eq ne lt ge ltu geu. |
+| `b.<cc>` | B | BR cond=cc | rs1, rs2, imm | `if (COND) npc = pc + IMM;` | Compare two registers and branch. Millicode control flow; never reads guest flags. cc: eq ne lt ge ltu geu. |
 | `bcc.<cc>` | C | BCC cond=cc | imm | `if (COND) npc = pc + b;` | Branch on a guest condition. cc: t f hi ls cc cs ne eq vc vs pl mi ge lt gt le. (reads nzvc) |
 | `bfextu` | R | BF fn=0 | rd, rs1, rs2 | `r = BF_EXTU(a, b);` | Extract the field described by rs2 (offset 4:0, width 9:5), zero-extended. |
 | `bfexts` | R | BF fn=1 | rd, rs1, rs2 | `r = BF_EXTS(a, b);` |  |

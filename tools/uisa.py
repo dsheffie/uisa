@@ -373,6 +373,10 @@ class Spec:
 
     def assemble(self, text):
         """Two-pass assembler: one instruction per line, `label:` definitions."""
+        return self.assemble_program(text)[0]
+
+    def assemble_program(self, text, base=0):
+        """Like assemble(), but also return the labels (byte addresses from `base`)."""
         lines, labels, pc = [], {}, 0
         for raw in text.splitlines():
             line = raw.split(";")[0].strip()
@@ -383,7 +387,13 @@ class Spec:
             if line:
                 lines.append((pc, line))
                 pc += 4
-        return [self.assemble_line(l, p, labels) for p, l in lines]
+        words = []
+        for p, l in lines:
+            try:
+                words.append(self.assemble_line(l, p, labels))
+            except SpecError as e:
+                raise SpecError("%s: %s" % (l, e))
+        return words, {k: v + base for k, v in labels.items()}
 
     def disassemble(self, word):
         v, vals = self.decode(word)

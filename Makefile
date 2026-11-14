@@ -23,6 +23,7 @@ test: $(GEN)
 	c++ -std=c++17 -O1 -Wall -Wextra -Ibuild -o build/test_cxx tests/test_cxx.cc
 	./build/test_cxx
 	python3 tools/gen_model.py >/dev/null
+	python3 tools/gen_millicode.py >/dev/null
 	c++ -std=c++17 -O1 -Ibuild -Imodel -o build/test_shadow tests/test_shadow.cc model/uisa_shadow.cc
 	./build/test_shadow
 	verilator --binary -Wall -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM --top-module tb_decode \

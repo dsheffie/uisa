@@ -28,13 +28,16 @@ static void run(Insn &t) {
     if (l.size) uisa_shadow_log(l.kind, l.addr, l.size, l.value);
   uisa_shadow_post(&t.post);
   if (uisa_shadow_count(t.op, t.expect) != 1) {
-    printf("FAIL: %s (opword %04x) expected result %d\n", t.name, t.op, t.expect);
+    printf("FAIL: %s (opword %04x) expected result %d; got:", t.name, t.op, t.expect);
+    for (int r = 0; r < 16; r++)
+      if (uisa_shadow_count(t.op, r)) printf(" [%d]=%llu", r, (unsigned long long)uisa_shadow_count(t.op, r));
+    printf("\n");
     fails++;
   }
 }
 
 int main() {
-  uisa_shadow_init(nullptr);
+  uisa_shadow_init("build/test_shadow_report.txt");
   {  // MOVE.L (A0)+,D1: load, post-increment, N set
     Insn t{"move.l (a0)+,d1", 0x2218, st(0x100, 0x2700), st(0x102, 0x2708), {{UISA_LOG_READ, 4, 0x1000, 0x80000001}}, 0};
     t.pre.r[8] = 0x1000;
@@ -68,12 +71,82 @@ int main() {
     t.post.r[8] = 0x1000; t.post.r[1] = 0xffff0003; t.post.r[2] = 0x7f;
     run(t);
   }
+  {  // MOVEM.L D0-D1/A6,-(A7): stores A6, D1, D0 downwards
+    Insn t{"movem.l d0-d1/a6,-(a7)", 0x48e7, st(0x700, 0x2700), st(0x704, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0x702, 0xc002}, {UISA_LOG_WRITE, 4, 0x7ffc, 0x66}, {UISA_LOG_WRITE, 4, 0x7ff8, 0x11},
+            {UISA_LOG_WRITE, 4, 0x7ff4, 0x10}}, 0};
+    t.pre.r[0] = 0x10; t.pre.r[1] = 0x11; t.pre.r[14] = 0x66; t.pre.r[15] = 0x8000;
+    t.post = t.pre; t.post.pc = 0x704; t.post.r[15] = 0x7ff4;
+    run(t);
+  }
+  {  // MOVEM.W (A7)+,D0/A1: word loads sign-extend into whole registers
+    Insn t{"movem.w (a7)+,d0/a1", 0x4c9f, st(0x800, 0x2700), st(0x804, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0x802, 0x0201}, {UISA_LOG_READ, 2, 0x7000, 0x8001}, {UISA_LOG_READ, 2, 0x7002, 0x0002}}, 0};
+    t.pre.r[15] = 0x7000; t.pre.r[0] = 0x12345678;
+    t.post = t.pre; t.post.pc = 0x804; t.post.r[0] = 0xffff8001; t.post.r[9] = 2; t.post.r[15] = 0x7004;
+    run(t);
+  }
+  {  // MOVE.W SR,D0 (supervisor): millicode
+    Insn t{"move.w sr,d0", 0x40c0, st(0x900, 0x2715), st(0x902, 0x2715), {}, 0};
+    t.pre.r[0] = 0xaaaa0000;
+    t.post.r[0] = 0xaaaa2715;
+    run(t);
+  }
+  {  // MOVE.W SR,D0 in user mode: privilege violation (raised, not compared)
+    Insn t{"move.w sr,d0 (user)", 0x40c1, st(0x980, 0x0000), st(0x1000, 0x2000), {}, 12};
+    run(t);
+  }
+  {  // MOVE.W #$0000,SR: supervisor -> user switches A7 to the USP
+    Insn t{"move.w #0,sr", 0x46fc, st(0xa00, 0x2704), st(0xa04, 0x0000), {{UISA_LOG_IFETCH, 2, 0xa02, 0x0000}}, 0};
+    t.pre.r[15] = 0x8000; t.pre.ctl[UISA_CTL_USP] = 0x4000;
+    t.post.r[15] = 0x4000; t.post.ctl[UISA_CTL_ISP] = 0x8000; t.post.ctl[UISA_CTL_USP] = 0x4000;
+    run(t);
+  }
+  {  // MOVEC VBR,D2
+    Insn t{"movec vbr,d2", 0x4e7a, st(0xb00, 0x2700), st(0xb04, 0x2700), {{UISA_LOG_IFETCH, 2, 0xb02, 0x2801}}, 0};
+    t.pre.ctl[UISA_CTL_VBR] = 0x1234; t.post.ctl[UISA_CTL_VBR] = 0x1234; t.post.r[2] = 0x1234;
+    run(t);
+  }
+  {  // MOVEC A1,USP-via-MOVEC (code 0x800)
+    Insn t{"movec a1,usp", 0x4e7b, st(0xc00, 0x2700), st(0xc04, 0x2700), {{UISA_LOG_IFETCH, 2, 0xc02, 0x9800}}, 0};
+    t.pre.r[9] = 0x5555; t.post.r[9] = 0x5555; t.post.ctl[UISA_CTL_USP] = 0x5555;
+    run(t);
+  }
+  {  // BFEXTU D1{4:8},D2: field of D1 starting 4 bits below the MSB
+    Insn t{"bfextu d1{4:8},d2", 0xe9c1, st(0xd00, 0x2710), st(0xd04, 0x2718), {{UISA_LOG_IFETCH, 2, 0xd02, 0x2108}}, 0};
+    t.pre.r[1] = 0x0ab00000; t.post.r[1] = 0x0ab00000; t.post.r[2] = 0xab;
+    run(t);
+  }
+  {  // BFEXTU (A0){12:12},D3: spans three bytes in memory
+    Insn t{"bfextu (a0){12:12},d3", 0xe9d0, st(0xe00, 0x2700), st(0xe04, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0xe02, 0x330c}, {UISA_LOG_READ, 1, 0x2001, 0x0f}, {UISA_LOG_READ, 1, 0x2002, 0xff}}, 0};
+    t.pre.r[8] = 0x2000; t.post.r[8] = 0x2000; t.post.r[3] = 0xfff; t.post.sr = 0x2708;
+    run(t);
+  }
+  {  // DBEQ D0 with Z clear: decrement and branch back
+    Insn t{"dbeq d0", 0x57c8, st(0xf00, 0x2700), st(0xf00 + 2 - 18, 0x2700), {{UISA_LOG_IFETCH, 2, 0xf02, 0xffee}}, 0};
+    t.pre.r[0] = 0x00010005; t.post.r[0] = 0x00010004;
+    run(t);
+  }
+  {  // MULU.L D1,D3:D2 (64-bit result)
+    Insn t{"mulu.l d1,d3:d2", 0x4c01, st(0x1000, 0x2700), st(0x1004, 0x2700), {{UISA_LOG_IFETCH, 2, 0x1002, 0x2403}}, 0};
+    t.pre.r[1] = 0x10000; t.pre.r[2] = 0x30000;
+    t.post.r[1] = 0x10000; t.post.r[2] = 0; t.post.r[3] = 3;
+    run(t);
+  }
+  {  // CMPM.B (A0)+,(A1)+: equal bytes set Z
+    Insn t{"cmpm.b (a0)+,(a1)+", 0xb308, st(0x1100, 0x2700), st(0x1102, 0x2704),
+           {{UISA_LOG_READ, 1, 0x3000, 0x41}, {UISA_LOG_READ, 1, 0x4000, 0x41}}, 0};
+    t.pre.r[8] = 0x3000; t.pre.r[9] = 0x4000; t.post.r[8] = 0x3001; t.post.r[9] = 0x4001;
+    run(t);
+  }
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
     t.post.r[0] = 5; t.post.r[1] = 6;
     run(t);
   }
+  uisa_shadow_dump();
   printf("test_shadow: %d failures\n", fails);
   return fails ? 1 : 0;
 }

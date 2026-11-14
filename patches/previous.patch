@@ -18,10 +18,30 @@ index 31e9fc4..4c076ba 100644
  if(ENABLE_OSX_BUNDLE)
  	set(GUIOSX_SOURCES
 diff --git a/previous-code/src/cpu/cpummu.h b/previous-code/src/cpu/cpummu.h
-index 6dd9e35..5e19caa 100644
+index 6dd9e35..3271355 100644
 --- a/previous-code/src/cpu/cpummu.h
 +++ b/previous-code/src/cpu/cpummu.h
-@@ -817,29 +817,45 @@ static ALWAYS_INLINE void uae_mmu_put_move16(uaecptr addr, uae_u32 *val)
+@@ -206,12 +206,13 @@ extern void REGPARAM3 dfc_put_long(uaecptr addr, uae_u32 val) REGPARAM;
+ extern void REGPARAM3 dfc_put_word(uaecptr addr, uae_u16 val) REGPARAM;
+ extern void REGPARAM3 dfc_put_byte(uaecptr addr, uae_u8 val) REGPARAM;
+ 
+-#define sfc040_get_long sfc_get_long
+-#define sfc040_get_word sfc_get_word
+-#define sfc040_get_byte sfc_get_byte
+-#define dfc040_put_long dfc_put_long
+-#define dfc040_put_word dfc_put_word
+-#define dfc040_put_byte dfc_put_byte
++/* MOVES: logging wrappers (defined with the 040 accessors below) */
++#define sfc040_get_long uisa_sfc040_get_long
++#define sfc040_get_word uisa_sfc040_get_word
++#define sfc040_get_byte uisa_sfc040_get_byte
++#define dfc040_put_long uisa_dfc040_put_long
++#define dfc040_put_word uisa_dfc040_put_word
++#define dfc040_put_byte uisa_dfc040_put_byte
+ 
+ #define sfc060_get_long sfc_get_long
+ #define sfc060_get_word sfc_get_word
+@@ -817,29 +818,78 @@ static ALWAYS_INLINE void uae_mmu_put_move16(uaecptr addr, uae_u32 *val)
  }
  
  // normal 040
@@ -32,6 +52,39 @@ index 6dd9e35..5e19caa 100644
 +#else
 +#define UISA_LOG(k, a, s, v) do { } while (0)
 +#endif
++STATIC_INLINE uae_u32 uisa_sfc040_get_long (uaecptr addr)
++{
++	uae_u32 v = sfc_get_long (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 4, v);
++	return v;
++}
++STATIC_INLINE uae_u16 uisa_sfc040_get_word (uaecptr addr)
++{
++	uae_u16 v = sfc_get_word (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 2, v);
++	return v;
++}
++STATIC_INLINE uae_u8 uisa_sfc040_get_byte (uaecptr addr)
++{
++	uae_u8 v = sfc_get_byte (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 1, v);
++	return v;
++}
++STATIC_INLINE void uisa_dfc040_put_long (uaecptr addr, uae_u32 v)
++{
++	UISA_LOG(UISA_LOG_WRITE, addr, 4, v);
++	dfc_put_long (addr, v);
++}
++STATIC_INLINE void uisa_dfc040_put_word (uaecptr addr, uae_u16 v)
++{
++	UISA_LOG(UISA_LOG_WRITE, addr, 2, v);
++	dfc_put_word (addr, v);
++}
++STATIC_INLINE void uisa_dfc040_put_byte (uaecptr addr, uae_u8 v)
++{
++	UISA_LOG(UISA_LOG_WRITE, addr, 1, v);
++	dfc_put_byte (addr, v);
++}
  STATIC_INLINE void put_byte_mmu040 (uaecptr addr, uae_u32 v)
  {
 +	UISA_LOG(UISA_LOG_WRITE, addr, 1, v & 0xff);
@@ -70,7 +123,7 @@ index 6dd9e35..5e19caa 100644
  }
  // normal 060
  STATIC_INLINE void put_byte_mmu060 (uaecptr addr, uae_u32 v)
-@@ -970,29 +986,39 @@ STATIC_INLINE uae_u32 get_lrmw_long_mmu040 (uaecptr addr)
+@@ -970,29 +1020,39 @@ STATIC_INLINE uae_u32 get_lrmw_long_mmu040 (uaecptr addr)
  STATIC_INLINE uae_u32 get_ibyte_mmu040 (int o)
  {
  	uae_u32 pc = m68k_getpci () + o;
@@ -116,7 +169,7 @@ index 6dd9e35..5e19caa 100644
  
  STATIC_INLINE uae_u32 get_ibyte_mmu060 (int o)
 diff --git a/previous-code/src/cpu/newcpu.c b/previous-code/src/cpu/newcpu.c
-index 4b43250..ab7f9aa 100644
+index 4b43250..0bf127c 100644
 --- a/previous-code/src/cpu/newcpu.c
 +++ b/previous-code/src/cpu/newcpu.c
 @@ -18,6 +18,7 @@
@@ -127,7 +180,7 @@ index 4b43250..ab7f9aa 100644
  
  #include "main.h"
  #include "compat.h"
-@@ -1920,8 +1921,163 @@ void set_cpu_caches (bool flush)
+@@ -1920,8 +1921,178 @@ void set_cpu_caches (bool flush)
  	flush_cpu_caches(flush);
  }
  
@@ -200,6 +253,21 @@ index 4b43250..ab7f9aa 100644
 +	s->pc = m68k_getpc ();
 +	MakeSR ();
 +	s->sr = regs.sr;
++	s->ctl[UISA_CTL_VBR] = regs.vbr;
++	s->ctl[UISA_CTL_SFC] = regs.sfc;
++	s->ctl[UISA_CTL_DFC] = regs.dfc;
++	s->ctl[UISA_CTL_CACR] = regs.cacr;
++	s->ctl[UISA_CTL_TC] = regs.tcr;
++	s->ctl[UISA_CTL_ITT0] = regs.itt0;
++	s->ctl[UISA_CTL_ITT1] = regs.itt1;
++	s->ctl[UISA_CTL_DTT0] = regs.dtt0;
++	s->ctl[UISA_CTL_DTT1] = regs.dtt1;
++	s->ctl[UISA_CTL_MMUSR] = regs.mmusr;
++	s->ctl[UISA_CTL_URP] = regs.urp;
++	s->ctl[UISA_CTL_SRP] = regs.srp;
++	s->ctl[UISA_CTL_USP] = regs.usp;
++	s->ctl[UISA_CTL_ISP] = regs.isp;
++	s->ctl[UISA_CTL_MSP] = regs.msp;
 +}
 +
 +static void uisa_shadow_pre_hook (uae_u32 opcode)
@@ -291,7 +359,7 @@ index 4b43250..ab7f9aa 100644
  }
  
  static uae_u32 opcode_swap(uae_u16 opcode)
-@@ -2407,6 +2563,7 @@ void check_prefs_changed_cpu(void)
+@@ -2407,6 +2578,7 @@ void check_prefs_changed_cpu(void)
  
  void init_m68k (void)
  {
@@ -299,7 +367,7 @@ index 4b43250..ab7f9aa 100644
  	disasm_init();
  	prefs_changed_cpu ();
  	update_68k_cycles ();
-@@ -6414,6 +6571,10 @@ static void m68k_run_mmu040 (void)
+@@ -6414,6 +6586,10 @@ static void m68k_run_mmu040 (void)
  				mmu_opcode = regs.opcode = x_prefetch (0);
  				count_instr (regs.opcode);
  				cpu_cycles = (*cpufunctbl[regs.opcode])(regs.opcode);

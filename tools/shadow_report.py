@@ -19,11 +19,13 @@ def main():
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--details", type=int, default=40)
     a = ap.parse_args()
-    cols, rows, details, kinds = None, [], [], ""
+    cols, rows, details, kinds, extra = None, [], [], "", ""
     with open(a.report) as f:
         for line in f:
             if line.startswith("# kinds:"):
                 kinds = line[len("# kinds:"):].strip()
+            elif line.startswith("# millicode"):
+                extra = line[2:].strip()
             elif line.startswith("# opword"):
                 cols = line[2:].split()[2:]
             elif line.startswith("! "):
@@ -41,11 +43,14 @@ def main():
                 per_form[form][c] += v
     total = sum(v for c, v in shadowed.items() if c != "aborted")
     print("instructions by flow kind: %s" % kinds)
-    print("PLA instructions shadowed: %d" % total)
+    if extra:
+        print(extra)
+    print("instructions shadowed: %d" % total)
     for c in cols:
         if shadowed[c]:
             print("  %-16s %12d  %6.3f%%" % (c, shadowed[c], 100.0 * shadowed[c] / max(1, total)))
-    bad = [(sum(v for c, v in cnt.items() if c not in ("match", "aborted")), form, cnt) for form, cnt in per_form.items()]
+    info = ("match", "aborted", "native", "exception")
+    bad = [(sum(v for c, v in cnt.items() if c not in info), form, cnt) for form, cnt in per_form.items()]
     bad = sorted((b for b in bad if b[0]), reverse=True)
     if bad:
         print("\nforms with mismatches:")

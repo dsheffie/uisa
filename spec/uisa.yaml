@@ -7,6 +7,8 @@
 #
 # Conventions for the `sem` C snippets (consumed by the generated ISS header):
 #   base ops:  uint32_t a = rs1, b = rs2 or the decoded immediate, pc; write r.
+#              IMM is always the decoded immediate (use it when b is rs2,
+#              e.g. a compare-and-branch displacement); OLD is rd's old value.
 #   guest ops: uint32_t a = rs1, b = rs2 or immediate; unsigned n = operand
 #              width (8/16/32); uint32_t m = MSK(n); bool xin,nin,zin,vin,cin
 #              = incoming flags. Write r (n-bit result, or 32-bit when the op's
@@ -236,7 +238,7 @@ base_ops:
   - {name: jal,  major: JAL,  fmt: J, asm: [rd, imm], unit: br, cti: jump, sem: "r = pc + 4; npc = pc + b;"}
   - {name: jalr, major: JALR, fmt: I, asm: [rd, rs1, imm], imm_signed: true, unit: br, cti: jump_ind, sem: "r = pc + 4; npc = (a + b) & ~3u;"}
   - {name: call, major: CALL, fmt: L, asm: [imm], unit: br, cti: call, sem: "CSTACK_PUSH(pc + 4); npc = pc + b;", desc: "Push the return address on the hardware millicode return stack. Overflow is a millicode fault."}
-  - {family: b, major: BR, per_cond: base, fmt: B, asm: [rs1, rs2, imm], unit: br, cti: branch, sem: "if (COND) npc = pc + b;", desc: "Compare two registers and branch. Millicode control flow; never reads guest flags."}
+  - {family: b, major: BR, per_cond: base, fmt: B, asm: [rs1, rs2, imm], unit: br, cti: branch, sem: "if (COND) npc = pc + IMM;", desc: "Compare two registers and branch. Millicode control flow; never reads guest flags."}
   - {family: bcc, major: BCC, per_cond: guest, fmt: C, asm: [imm], unit: br, cti: branch, reads_flags: [nzvc], sem: "if (COND) npc = pc + b;", desc: "Branch on a guest condition."}
 
   # --- bitfields on registers (68k semantics: offset counts from the MSB, register fields wrap) ---

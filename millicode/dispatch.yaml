@@ -1,0 +1,17 @@
+# Which millicode routine handles each 68k operation that spec/flows.yaml
+# sends to millicode (keys are flows.yaml's millicode op names).
+# Operations without an entry still run natively in the shadow model.
+sources: [system.s, ea.s, integer.s]
+base: 0x0
+handlers:
+  "MOVE to/from SR, CCR, USP": move_sr
+  "ORI/ANDI/EORI to CCR, SR": logic_sr
+  MOVEC: movec
+  DBcc: dbcc
+  CMPM: cmpm
+  MULx: mull
+  MOVES: moves
+  BFTST: bitfield
+  BFEXTU: bitfield
+  BFEXTS: bitfield
+  BFFFO: bitfield
