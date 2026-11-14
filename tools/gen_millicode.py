@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Assemble the millicode (millicode/*.s) and build its dispatch table.
+"""Assemble the millicode (millicode/*.s, *.c) and build its dispatch table.
+
+C sources are compiled by ucc (build/compiler/ucc, see compiler/) into
+build/millicode/<name>.s first; hand-written and compiled code are then
+assembled together as one image.
 
 Writes build/uisa_millicode.inc for the shadow model:
   MC_BASE            hidden-memory address of the image
@@ -8,6 +12,8 @@ Writes build/uisa_millicode.inc for the shadow model:
 """
 
 import os
+import re
+import subprocess
 import sys
 
 import yaml
@@ -19,15 +25,40 @@ import m68kdec  # noqa: E402
 import uisa  # noqa: E402
 
 ROOT = os.path.join(HERE, "..")
+UCC = os.path.join(ROOT, "build", "compiler", "ucc")
+
+
+def source_text(src):
+    path = os.path.join(ROOT, "millicode", src)
+    if src.endswith(".c"):
+        out_dir = os.path.join(ROOT, "build", "millicode")
+        os.makedirs(out_dir, exist_ok=True)
+        out = os.path.join(out_dir, os.path.splitext(src)[0] + ".s")
+        if subprocess.call([UCC, path, "-o", out]) != 0:
+            sys.exit("millicode: ucc failed on %s" % src)
+        path = out
+    with open(path) as f:
+        return f.read()
+
+
+def check_labels(texts):
+    """The assembler lets a later label silently replace an earlier one."""
+    seen = {}
+    for src, text in texts:
+        for line in text.splitlines():
+            m = re.match(r"^\s*([A-Za-z_][\w.]*):", line.split(";")[0])
+            if m:
+                if m.group(1) in seen:
+                    sys.exit("millicode: label %s defined in both %s and %s" % (m.group(1), seen[m.group(1)], src))
+                seen[m.group(1)] = src
 
 
 def main():
     with open(os.path.join(ROOT, "millicode", "dispatch.yaml")) as f:
         d = yaml.safe_load(f)
-    text = ""
-    for src in d["sources"]:
-        with open(os.path.join(ROOT, "millicode", src)) as f:
-            text += f.read() + "\n"
+    texts = [(src, source_text(src)) for src in d["sources"]]
+    check_labels(texts)
+    text = "".join(t + "\n" for _, t in texts)
     spec = uisa.load()
     base = int(d.get("base", 0))
     words, labels = spec.assemble_program(text, base)

@@ -3,6 +3,8 @@
 VMDIR ?= /tmp/uisa_obj_tb_$(USER)
 GEN := build/uisa_pkg.sv build/uisa.h build/uisa_sem.inc doc/uisa.md build/vectors.hex
 
+UCC := build/compiler/ucc
+
 all: test
 
 $(GEN): spec/uisa.yaml doc/intro.md tools/gen.py tools/uisa.py
@@ -16,7 +18,12 @@ doc/flows.md: spec/flows.yaml spec/uisa.yaml tools/flows.py tools/m68kdec.py dat
 
 flows: doc/flows.md
 
-test: $(GEN)
+# the millicode C compiler (compiler/, CMake; needs flex, bison and z3)
+compiler:
+	cmake -S compiler -B build/compiler -DCMAKE_BUILD_TYPE=RelWithDebInfo >/dev/null
+	cmake --build build/compiler -j8 >/dev/null
+
+test: $(GEN) compiler
 	python3 tests/selftest.py
 	python3 tests/test_m68kdec.py
 	python3 tools/flows.py check
@@ -33,4 +40,4 @@ test: $(GEN)
 clean:
 	rm -rf build $(VMDIR)
 
-.PHONY: all gen flows test clean
+.PHONY: all gen flows compiler test clean

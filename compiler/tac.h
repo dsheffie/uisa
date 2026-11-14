@@ -1,543 +1,163 @@
-/* File: tac.h
- * -----------
- * This module contains the Instruction class (and its various
- * subclasses) that represent Tac instructions and the Location
- * class used for operands to those instructions.
+// -*-c++-*-
+/* tac.h: the three-address code of the uisa millicode compiler.
  *
- * Each instruction is mostly just a little struct with a
- * few fields, but each responds polymorphically to the methods
- * Print and Emit, the first is used to print out the TAC form of
- * the instruction (helpful when debugging) and the second to
- * convert to the appropriate MIPS assembly.
- *
- * The operands to each instruction are of Location class.
- * A Location object is a simple representation of where a variable
- * exists at runtime, i.e. whether it is on the stack or global
- * segment and at what offset relative to the current fp or gp.
- *
- * You may need to make changes/extensions to these classes
- * if you are working on IR optimization.
-
+ * Forked from Decaf's tac.h. Decaf's TAC named stack slots (Location) and
+ * had a separate renamed form (rVariable); here one Reg class serves both:
+ * before SSA construction a Reg is a source variable that may be assigned
+ * many times, afterwards every Reg has exactly one definition. All values
+ * are 32 bits; the front end has already applied C's conversions.
  */
+#ifndef UCC_TAC_H
+#define UCC_TAC_H
 
-#ifndef _H_tac
-#define _H_tac
-
+#include <cstdint>
 #include <set>
-#include "llvmInc.hh"
+#include <string>
+#include <vector>
 
-#include "list.h" // for VTable
-class Mips;
-
-
-    // A Location object is used to identify the operands to the
-    // various TAC instructions. A Location is either fp or gp
-    // relative (depending on whether in stack or global segemnt)
-    // and has an offset relative to the base of that segment.
-    // For example, a declaration for integer num as the first local
-    // variable in a function would be assigned a Location object
-    // with name "num", segment fpRelative, and offset -8. 
- 
-typedef enum {fpRelative, gpRelative} Segment;
-
-class Variable;
-class rVariable;
-
-class Location
-{
- public:
-  const char *variableName;
-  Segment segment;
-  int offset;
-  bool isFloat;
-  bool isFuncArg;
-  std::string funcArgName;
-  Location(Segment seg, int offset, const char *name);
-  const char *GetName()           { return variableName; }
-  Segment GetSegment()            { return segment; }
-  int GetOffset()                 { return offset; }
-  bool GetFloat()                 { return isFloat; }
-  void SetFloat(bool isFloat)     { this->isFloat = isFloat; } 
-  bool isGlobal() {return this->segment == gpRelative;}
+struct IntrinsicDesc {
+  const char *name;
+  const char *asmfmt;     // %d result, %N argument N, %mN address argument N as disp(base)
+  const char *args;       // per argument: v value, i constant, m address, t tied old result
+  int has_result;
+  int tied;               // argument whose register the result must reuse, or -1
+  int side_effects;
+  int noreturn;
+  int flags;              // reads or writes the renamed guest flags
+  struct { int lo, hi, scale; } range[6];
 };
- 
+struct NamedConst { const char *name; int value; };
+struct EntryReg { const char *name; int reg; };
 
+class Function;
+class BasicBlock;
+class Instr;
 
-  // base class from which all Tac instructions derived
-  // has the interface for the 2 polymorphic messages: Print & Emit
-
-
-
-
-
-class Instruction {
-    protected:
-      char printed[128];
-      
-    public:
-      typedef enum {
-	LoadConstant=0, 
-	LoadStringConstant=1,
-	LoadLabel=2, 
-	Assign=3,
-	Load=4,
-	Store=5,
-	BinaryOp=6, 
-	Label=7,
-	Goto=8, 
-	IfZ=9,
-	BeginFunc=10,
-	EndFunc=11,
-	Return=12, 
-	PushParam=13,
-	PopParams=14, 
-	LCall=15,
-	ACall=16,
-	VTable=17,
-	NumTAC=18
-      }
-      TACTypes;
-      virtual ~Instruction() {}
-      virtual void Print();
-      virtual void PrintSSA() {}
-      virtual std::string asString();
-      virtual void getLocations(std::set<Location*> &locs);
-      virtual TACTypes getType() { return Instruction::NumTAC; }
-      virtual void EmitSpecific(Mips *mips) = 0;
-      virtual void Emit(Mips *mips);
-      
-      virtual size_t numOperands() const {
-	return 0;
-      }
-      virtual Location *getLocation(size_t id) const {
-	return nullptr;
-      }
-      virtual Location *getDst() {
-	return nullptr;
-      }
+class Reg {
+ public:
+  int id;
+  std::string name;
+  Function *fn;
+  Instr *def = nullptr;       // SSA definition
+  Reg *var = nullptr;         // SSA: the source variable this value renames
+  int color = -1;             // assigned x register
+  int precolor = -1;          // fixed x register (entry-ABI values)
+  bool isVar = false;         // a source variable (before SSA)
+  Reg(int id, std::string name, Function *fn) : id(id), name(std::move(name)), fn(fn) {}
+  std::string str() const { return name + "." + std::to_string(id); }
 };
 
-  
-  
-  // for convenience, the instruction classes are listed here.
-  // the interfaces for the classes follows below
-  
-class LoadConstant;
-class LoadStringConstant;
-class LoadLabel;
-class Assign;
-class Load;
-class Store;
-class BinaryOp;
-class Label;
-class Goto;
-class IfZ;
-class BeginFunc;
-class EndFunc;
-class Return;
-class PushParam;
-class PopParams;
-class LCall;
-class ACall;
-class VTable;
-class FnDecl;
-
-class LoadConstant: public Instruction {
- public:
-  Location *dst;
-  rVariable *rDst;
-  int val;
-  LoadConstant(Location *dst, int val);
-  void EmitSpecific(Mips *mips) override;
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst);
-  }
-  TACTypes getType() override { return Instruction::LoadConstant; }
-  void PrintSSA() override;
+struct Operand {
+  enum Kind { None, R, Imm, Phys } k = None;
+  Reg *r = nullptr;
+  int32_t imm = 0;
+  int phys = 0;               // register namespace index (x0, d3, gpc, ...)
+  static Operand reg(Reg *r) { Operand o; o.k = R; o.r = r; return o; }
+  static Operand cst(int32_t v) { Operand o; o.k = Imm; o.imm = v; return o; }
+  static Operand preg(int p) { Operand o; o.k = Phys; o.phys = p; return o; }
+  bool isReg() const { return k == R; }
+  bool isImm() const { return k == Imm; }
+  std::string str() const;
 };
 
-class LoadStringConstant: public Instruction {
- public:
-  Location *dst;
-  rVariable *rDst;
-  char *str;
-  LoadStringConstant(Location *dst, const char *s);
-  void EmitSpecific(Mips *mips) override;
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst);
-  }
-  TACTypes getType() override { return Instruction::LoadStringConstant; }
-  void PrintSSA() override;
-};
-    
-class LoadLabel: public Instruction {
- public:
-  Location *dst;
-  rVariable *rDst;
-  const char *label;
-  LoadLabel(Location *dst, const char *label);
-  void EmitSpecific(Mips *mips) override;
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst);
-  }
-  TACTypes getType() override {
-    return Instruction::LoadLabel;
-  }
-  void PrintSSA() override;
+enum class Cond { EQ, NE, LT, GE, LTU, GEU, GT, LE, GTU, LEU };
+Cond invert(Cond c);
+Cond swapCond(Cond c);
+const char *condName(Cond c);
+bool evalCond(Cond c, uint32_t a, uint32_t b);
+
+enum class Op {
+  Copy,                                          // dst = a0
+  Add, Sub, Mul, Div, DivU, Rem, RemU,
+  And, Or, Xor, Shl, Shr, Sar,
+  Set,                                           // dst = (a0 cond a1)
+  Sext8, Sext16, Zext8, Zext16,
+  Intrin,                                        // [dst =] intrinsic(a...)
+  Call,                                          // [dst =] callee(a...)
+  Phi,                                           // dst = phi(a[i] from preds[i])
+  PWrite,                                        // phys register `phys` = a0
+  // terminators
+  Br,                                            // if (a0 cond a1) goto t else f
+  Jmp,                                           // goto t
+  Ret,                                           // return [a0]
+  Stop,                                          // control ended in a noreturn intrinsic
 };
 
-class Assign: public Instruction {
+class Instr {
  public:
-  Location *dst, *src;
-  rVariable *rDst, *rSrc;
-  Assign(Location *dst, Location *src);
-  void EmitSpecific(Mips *mips) override;
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst); locs.insert(src);
-  }
-  TACTypes getType() override {
-    return Instruction::Assign;
-  }
-  void PrintSSA() override;
-  
-  size_t numOperands() const override {
-    return 1;
-  }
-  Location *getLocation(size_t id) const override{
-    switch(id)
-      {
-      case 0:
-	return src;
-      default:
-	break;
-      }
-    return nullptr;
-  }
+  Op op;
+  Reg *dst = nullptr;
+  std::vector<Operand> a;
+  Cond cond = Cond::EQ;
+  const IntrinsicDesc *in = nullptr;
+  Function *callee = nullptr;
+  BasicBlock *t = nullptr, *f = nullptr;
+  std::vector<BasicBlock *> preds;               // phi incoming blocks, parallel to a
+  int phys = 0;                                  // PWrite target
+  int line = 0;
+  int disp = 0;                                  // displacement folded into the address argument
+  bool falloff = false;                          // Stop: control reached the end of the function
+  Instr(Op op) : op(op) {}
+  bool isTerm() const { return op == Op::Br || op == Op::Jmp || op == Op::Ret || op == Op::Stop; }
+  bool hasSideEffects() const;
+  std::string str() const;
 };
 
-class Load: public Instruction {
+class BasicBlock {
  public:
-  Location *dst, *src;
-  rVariable *rDst, *rSrc;
-  int offset;
-  Load(Location *dst, Location *src, int offset = 0);
-  void EmitSpecific(Mips *mips) override;
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst); locs.insert(src);
-  }
-  TACTypes getType() override { return Instruction::Load; }
-  void PrintSSA() override;
-
-  size_t numOperands() const override {
-    return 1;
-  }
-  Location *getLocation(size_t id) const override {
-    switch(id)
-      {
-      case 0:
-	return src;
-      default:
-	break;
-      }
-    return nullptr;
-  }
+  int id;
+  std::string name;
+  Function *fn;
+  std::vector<Instr *> ins;
+  std::vector<BasicBlock *> preds, succs;
+  // dominance (codegen.cpp)
+  BasicBlock *idom = nullptr;
+  std::vector<BasicBlock *> dtree;
+  std::vector<BasicBlock *> dfrontier;
+  std::set<Reg *> phiVars;
+  int loopDepth = 0;
+  int rpo = 0;
+  BasicBlock(int id, std::string name, Function *fn) : id(id), name(std::move(name)), fn(fn) {}
+  Instr *term() const { return ins.empty() ? nullptr : ins.back(); }
+  bool terminated() const { return term() && term()->isTerm(); }
 };
 
-class Store: public Instruction {
+class Function {
  public:
-  Location *dst, *src;
-  rVariable *rDst, *rSrc;
-  int offset;
-  Store(Location *d, Location *s, int offset = 0);
-  void EmitSpecific(Mips *mips) override;
-  Location *getDst() override {
-    return dst;
+  std::string name;
+  bool isEntry = false;          // millicode entry point (dispatched, never called)
+  bool returnsValue = false;
+  int line = 0;
+  std::vector<Reg *> params;     // SSA values defined at entry (after construction)
+  std::vector<Reg *> paramVars;  // the source variables of the parameters
+  std::vector<Reg *> entryRegs;  // entry-ABI values (precolored), defined at entry
+  Reg *retReg = nullptr;         // the register a value is returned in
+  std::vector<BasicBlock *> blocks;
+  std::vector<Reg *> regs;
+  std::set<Function *> callees;
+  int nextBlock = 0;
+  Function(std::string name) : name(std::move(name)) {}
+  Reg *newReg(const std::string &n) {
+    Reg *r = new Reg((int)regs.size(), n, this);
+    regs.push_back(r);
+    return r;
   }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst); locs.insert(src);
+  BasicBlock *newBlock(const std::string &n) {
+    BasicBlock *b = new BasicBlock(nextBlock++, n, this);
+    blocks.push_back(b);
+    return b;
   }
-  TACTypes getType() override { return Instruction::Store; }
-  void PrintSSA() override;
-
-  Location *getLocation(size_t id) const override {
-    switch(id)
-      {
-      case 0:
-	return src;
-      case 1:
-	return dst;
-      default:
-	break;
-      }
-    return nullptr;
-  }
-  size_t numOperands() const override {
-    return 2;
-  }
-  
+  void print(FILE *f) const;
+  void rebuildEdges();
 };
 
-class BinaryOp: public Instruction {
- public:
-  typedef enum {Add, Sub, Mul, Div, Mod, Eq, Less, And, Or, NumOps} OpCode;
-  static const char * const opName[NumOps];
-  static const char * const dotOpName[NumOps];
-  static OpCode OpCodeForName(const char *name);
-  OpCode code;
-  Location *dst, *op1, *op2;
-  rVariable *rDst, *rOp1, *rOp2;
-  bool isFloat;
-  std::string dotString;
-  BinaryOp(OpCode c, Location *dst, Location *op1, Location *op2);
-  void EmitSpecific(Mips *mips) override;
-  std::string asString() override;
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst);
-    locs.insert(op1);
-    locs.insert(op2);
-  }
-  TACTypes getType() override {
-    return Instruction::BinaryOp;
-  }
-  void PrintSSA() override;
-  Location *getLocation(size_t id) const override {
-    switch(id)
-      {
-      case 0:
-	return op1;
-      case 1:
-	return op2;
-      default:
-	break;
-      }
-    return nullptr;
-  }
-  size_t numOperands() const override {
-    return 2;
-  }
+struct Program {
+  std::vector<Function *> funcs;
 };
 
-class Label: public Instruction {
- public:
-  const char *label;
-  Label(const char *label);
-  std::string getLabel() { return std::string(label); }
-  TACTypes getType() override { return Instruction::Label; }
-  void Print() override;
-  void EmitSpecific(Mips *mips) override;
-};
-
-class Goto: public Instruction {
- public:
-  const char *label;
-  Goto(const char *label);
-  std::string getLabel() { return std::string(label); }
-  TACTypes getType() override { return Instruction::Goto; }
-  void EmitSpecific(Mips *mips) override;
-  void PrintSSA() override;
-};
-
-class IfZ: public Instruction {
- public:
-  Location *test;
-  const char *label;
-  rVariable *rTest;
-  IfZ(Location *test, const char *label);
-  void EmitSpecific(Mips *mips) override;
-  void PrintSSA() override;
-  std::string getLabel() { 
-    return std::string(label);
-  }
-  TACTypes getType() override {
-    return Instruction::IfZ;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(test);
-  }
-  Location *getLocation(size_t id) const override {
-    switch(id)
-      {
-      case 0:
-	return test;
-      default:
-	break;
-      }
-    return nullptr;
-  }
-  size_t numOperands() const override {
-    return 1;
-  }
-  
-};
-
-
-
-class BeginFunc: public Instruction {
- public:
-  FnDecl *func;
-  int frameSize;
-  BeginFunc();
-  // used to backpatch the instruction with frame size once known
-  TACTypes getType() override { return Instruction::BeginFunc; }
-  void SetFrameSize(int numBytesForAllLocalsAndTemps);
-  void EmitSpecific(Mips *mips) override;
-};
-
-class EndFunc: public Instruction {
- public:
-  EndFunc();
-  TACTypes getType() override { return Instruction::EndFunc; }
-  void EmitSpecific(Mips *mips) override;
-};
-
-class Return: public Instruction {
- public:
-  Location *val;
-  rVariable *rVal;
-  Return(Location *val);
-  void EmitSpecific(Mips *mips) override;
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(val);
-  }
-  TACTypes getType() override {
-    return Instruction::Return;
-  }
-  void PrintSSA() override;
-  Location *getLocation(size_t id) const override {
-    switch(id)
-      {
-      case 0:
-	return val;
-      default:
-	break;
-      }
-    return nullptr;
-  }
-  size_t numOperands() const override {
-    return 1;
-  }
-  
-};   
-
-class PushParam: public Instruction {
- public:
-  Location *param;
-  rVariable *rParam;
-  PushParam(Location *param);
-  void EmitSpecific(Mips *mips) override;
-  void PrintSSA() override;
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(param);
-  }
-  TACTypes getType() override {
-    return Instruction::PushParam;
-  }
-  Location *getLocation(size_t id) const override {
-    switch(id)
-      {
-      case 0:
-	return param;
-      default:
-	break;
-      }
-    return nullptr;
-  }
-  size_t numOperands() const override {
-    return 1;
-  }
-}; 
-
-class PopParams: public Instruction {
- public:
-  int numBytes;
-  PopParams(int numBytesOfParamsToRemove);
-  TACTypes getType() override {
-    return Instruction::PopParams;
-  }
-  void EmitSpecific(Mips *mips) override;
-}; 
-
-class LCall: public Instruction {
- public:
-  const char *label;
-  Location *dst;
-  rVariable *rDst;
-  LCall(const char *label, Location *result);
-  void EmitSpecific(Mips *mips) override;
-  std::string getLabel() {
-    return std::string(label);
-  }
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst);
-  }
-  TACTypes getType() override {
-    return Instruction::LCall;
-  }
-  void PrintSSA() override;
-};
-
-class ACall: public Instruction {
- public:
-  Location *dst, *methodAddr;
-  rVariable *rDst, *rMethodAddr;
-  ACall(Location *meth, Location *result);
-  void EmitSpecific(Mips *mips) override;
-  Location *getDst() override {
-    return dst;
-  }
-  void getLocations(std::set<Location*> &locs) override {
-    locs.insert(dst);
-    locs.insert(methodAddr);
-  }
-  TACTypes getType() override {
-    return Instruction::ACall;
-  }
-  Location *getLocation(size_t id) const override {
-    switch(id)
-      {
-      case 0:
-	return methodAddr;
-      default:
-	break;
-      }
-    return nullptr;
-  }
-  size_t numOperands() const override {
-    return 1;
-  }
-  void PrintSSA() override;
-};
-
-class VTable: public Instruction {
- public:
-  List<const char *> *methodLabels;
-  const char *label;
-  VTable(const char *labelForTable, List<const char *> *methodLabels);
-  TACTypes getType() override { return Instruction::VTable; }
-  void Print() override;
-  void EmitSpecific(Mips *mips) override;
-};
-
+const IntrinsicDesc *findIntrinsic(const std::string &name);
+std::vector<NamedConst> specConsts();
+const EntryReg *findEntryReg(const std::string &name);
+const char *regName(int idx);
 
 #endif

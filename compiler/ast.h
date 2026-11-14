@@ -1,127 +1,256 @@
 // -*-c++-*-
-/* File: ast.h
+/* ast.h: the abstract syntax tree of the millicode C subset.
  *
- * This file defines the abstract base class Node and the concrete Identifier
- * and Error node subclasses that are used through the tree as leaf nodes. A
- * parse tree is a hierarchical collection of ast nodes (or, more correctly, of
- * instances of concrete subclassses such as VarDecl, ForStmt, and AssignExpr).
- *
- * Printing: The only interesting behavior of the node classes for pp2 is the
- * bility to print the tree using an in-order walk.  Each node class is
- * responsible for printing itself/children by overriding the virtual
- * PrintChildren() and getPrintNameForNode() methods. All the classes we provide
- * already implement these methods, so your job is to construct the nodes and
- * wire them up during parsing. Once that's done, printing is a snap!
- *
- * Semantic analysis: For pp3 you are adding "Check" behavior to the ast
- * node classes. Your semantic analyzer should do an inorder walk on the
- * parse tree, and when visiting each node, verify the particular
- * semantic rules that apply to that construct.
+ * Forked from Decaf's ast*.h. The node hierarchy (Node / Expr / Stmt /
+ * declarations) and the "each node emits its own TAC" structure are Decaf's;
+ * the Java object model is gone. Semantic checks happen during TAC
+ * generation (ast.cpp), which also applies C's integer promotions and
+ * conversions so that the TAC is plain 32-bit arithmetic.
  */
+#ifndef UCC_AST_H
+#define UCC_AST_H
 
-#ifndef AST_H
-#define AST_H
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
 
-#include <stdlib.h>
-#include "location.h"
-#include <iostream>
-#include "check.h"
 #include "tac.h"
 
-using namespace std;
+extern int yylineno;
 
-class Node
-{
-  protected:
-    /** lexical location of the node; NULL for nodes 
-     *that don't care/use locations */
-    yyltype *location;
-
-    /** pointer to the parent node in the parse tree */
-    Node *parent;
-    Location *myLocation;
-
-
-  public:
-    Node(yyltype loc);
-    Node();
-    virtual ~Node() {}
-
-    //for pp4
-    virtual Location* GetLocation();
-    virtual void SetLocation(Location * l);
-    virtual void PushOntoStack();
-
-    yyltype *getLocation()   { return location; }
-    void setParent(Node *p)  { parent = p;      }
-    Node *getParent()        { return parent;   }
-
-    virtual const char *getPrintNameForNode() = 0;
-
-    // print() is deliberately _not_ virtual
-    // subclasses should override printChildren() instead
-    void print(int indentLevel, const char *label = NULL);
-
-    virtual void printChildren(int indentLevel) {}
-
-    /*checker function for every node*/
-    bool check(Check *c);
-
-    virtual void emit();
-
-    /*checker function for every node*/
-    virtual bool checkChildren(Check *c) {
-      return true;
-    }
-    /*other virtual functions for classes inheriting node*/
-    virtual bool isVarDecl() { return false;}
-    virtual bool isFnDecl() { return false; }
-    virtual bool isClassDecl() { return false; }
-    virtual bool isInterfaceDecl() { return false; }
-
+struct Type {
+  int bits = 32;
+  bool sign = true;
+  bool isVoid = false;
+  Type() {}
+  Type(int bits, bool sign) : bits(bits), sign(sign) {}
+  static Type voidType() { Type t; t.isVoid = true; return t; }
+  static Type s32() { return Type(32, true); }
+  static Type u32() { return Type(32, false); }
+  std::string str() const;
+  bool operator==(const Type &o) const { return isVoid == o.isVoid && bits == o.bits && sign == o.sign; }
 };
 
+class CG;
+class Block;
 
-
-class Identifier : public Node
-{
-  protected:
-    char *name;
-
-  public:
-    bool operator==(const Identifier &rhs) const;
-    bool operator!=(const Identifier &rhs) const;
-    Identifier(yyltype loc, const char *name);
-    Identifier(const char* name);
-    const char *getPrintNameForNode() override {
-      return "Identifier";
-    }
-    void printChildren(int indentLevel) override;
-
-    /*check*/
-    bool checkChildren(Check *c) override;
-    char *getName();
-    
-    friend ostream& operator<<(ostream& out, Identifier *id)
-    { return out << id->name; }
-
-    void emit() override;
+// The value of an expression: a TAC operand plus its C type. Every value is
+// kept canonical for its type (u8 zero-extended, s8 sign-extended, ...), so
+// integer promotion never needs an instruction.
+struct EV {
+  Operand op;
+  Type ty;
+  bool isConst() const { return op.isImm(); }
 };
 
-
-/**
- * This node class is represents a portion of the tree that encountered syntax
- * errors during parsing. The partial completed tree is discarded along with the
- * states being popped, and an instance of the Error class can stand in as the
- * placeholder in the parse tree when your parser can continue after an error.
- */
-class Error : public Node
-{
-  public:
-    Error() : Node() {}
-    const char *getPrintNameForNode() override {
-      return "Error";
-    }
+class Node {
+ public:
+  int line;
+  Node() : line(yylineno) {}
+  virtual ~Node() {}
 };
 
-#endif /* AST_H */
+class Expr : public Node {
+ public:
+  virtual EV gen(CG &cg) = 0;
+  // Branch to t if the expression is nonzero, else to f.
+  virtual void genCond(CG &cg, BasicBlock *t, BasicBlock *f);
+  virtual const char *lvalueName() const { return nullptr; }
+};
+
+class IntLit : public Expr {
+ public:
+  uint32_t value; bool isUnsigned;
+  IntLit(uint32_t v, bool u) : value(v), isUnsigned(u) {}
+  EV gen(CG &cg) override;
+};
+
+class VarRef : public Expr {
+ public:
+  std::string name;
+  VarRef(const char *n) : name(n) {}
+  EV gen(CG &cg) override;
+  const char *lvalueName() const override { return name.c_str(); }
+};
+
+class UnaryExprNode : public Expr {
+ public:
+  int op; Expr *e;
+  UnaryExprNode(int op, Expr *e) : op(op), e(e) {}
+  EV gen(CG &cg) override;
+  void genCond(CG &cg, BasicBlock *t, BasicBlock *f) override;
+};
+
+class BinaryExpr : public Expr {
+ public:
+  int op; Expr *l, *r;      // op: + - * / % & | ^ L(<<) R(>>)
+  BinaryExpr(int op, Expr *l, Expr *r) : op(op), l(l), r(r) {}
+  EV gen(CG &cg) override;
+};
+
+class CompareExpr : public Expr {
+ public:
+  Cond c; Expr *l, *r;
+  CompareExpr(Cond c, Expr *l, Expr *r) : c(c), l(l), r(r) {}
+  EV gen(CG &cg) override;
+  void genCond(CG &cg, BasicBlock *t, BasicBlock *f) override;
+};
+
+class LogicalExpr : public Expr {
+ public:
+  int op; Expr *l, *r;      // '&' for &&, '|' for ||
+  LogicalExpr(int op, Expr *l, Expr *r) : op(op), l(l), r(r) {}
+  EV gen(CG &cg) override;
+  void genCond(CG &cg, BasicBlock *t, BasicBlock *f) override;
+};
+
+class CondExprNode : public Expr {
+ public:
+  Expr *c, *a, *b;
+  CondExprNode(Expr *c, Expr *a, Expr *b) : c(c), a(a), b(b) {}
+  EV gen(CG &cg) override;
+};
+
+class AssignExpr : public Expr {
+ public:
+  int op; Expr *lhs, *rhs;  // op 0 for plain '=', else the compound operator
+  AssignExpr(int op, Expr *l, Expr *r) : op(op), lhs(l), rhs(r) {}
+  EV gen(CG &cg) override;
+};
+
+class IncDecExpr : public Expr {
+ public:
+  bool prefix; int op; Expr *e;
+  IncDecExpr(bool p, int op, Expr *e) : prefix(p), op(op), e(e) {}
+  EV gen(CG &cg) override;
+};
+
+class CastExpr : public Expr {
+ public:
+  Type t; Expr *e;
+  CastExpr(Type t, Expr *e) : t(t), e(e) {}
+  EV gen(CG &cg) override;
+};
+
+class CallExpr : public Expr {
+ public:
+  std::string name; std::vector<Expr *> args;
+  CallExpr(const char *n, std::vector<Expr *> a) : name(n), args(std::move(a)) {}
+  EV gen(CG &cg) override;
+ private:
+  EV genIntrinsic(CG &cg, const IntrinsicDesc *d);
+};
+
+class Stmt : public Node {
+ public:
+  virtual void gen(CG &cg) = 0;
+};
+
+class Block : public Stmt {
+ public:
+  std::vector<Stmt *> stmts;
+  void gen(CG &cg) override;
+};
+
+struct DeclItem { const char *name; Expr *init; int line; };
+
+class DeclStmt : public Stmt {
+ public:
+  Type t; std::vector<DeclItem> items; bool isConst;
+  DeclStmt(Type t, std::vector<DeclItem> i, bool c) : t(t), items(std::move(i)), isConst(c) {}
+  void gen(CG &cg) override;
+};
+
+class ExprStmt : public Stmt {
+ public:
+  Expr *e;
+  ExprStmt(Expr *e) : e(e) {}
+  void gen(CG &cg) override;
+};
+
+class IfStmt : public Stmt {
+ public:
+  Expr *c; Stmt *t, *e;
+  IfStmt(Expr *c, Stmt *t, Stmt *e) : c(c), t(t), e(e) {}
+  void gen(CG &cg) override;
+};
+
+class WhileStmt : public Stmt {
+ public:
+  Expr *c; Stmt *body;
+  WhileStmt(Expr *c, Stmt *b) : c(c), body(b) {}
+  void gen(CG &cg) override;
+};
+
+class DoWhileStmt : public Stmt {
+ public:
+  Stmt *body; Expr *c;
+  DoWhileStmt(Stmt *b, Expr *c) : body(b), c(c) {}
+  void gen(CG &cg) override;
+};
+
+class ForStmt : public Stmt {
+ public:
+  Stmt *init; Expr *c, *step; Stmt *body;
+  ForStmt(Stmt *i, Expr *c, Expr *s, Stmt *b) : init(i), c(c), step(s), body(b) {}
+  void gen(CG &cg) override;
+};
+
+class SwitchStmt : public Stmt {
+ public:
+  Expr *e; Block *body;
+  SwitchStmt(Expr *e, Block *b) : e(e), body(b) {}
+  void gen(CG &cg) override;
+};
+
+class CaseLabel : public Stmt {   // `case K:` (value) or `default:` (null)
+ public:
+  Expr *value;
+  CaseLabel(Expr *v) : value(v) {}
+  void gen(CG &cg) override;
+};
+
+class ReturnStmt : public Stmt {
+ public:
+  Expr *e;
+  ReturnStmt(Expr *e) : e(e) {}
+  void gen(CG &cg) override;
+};
+
+class BreakStmt : public Stmt {
+ public:
+  void gen(CG &cg) override;
+};
+
+class ContinueStmt : public Stmt {
+ public:
+  void gen(CG &cg) override;
+};
+
+struct Param { Type t; const char *name; };
+
+class FnDecl : public Node {
+ public:
+  Type ret; std::string name; std::vector<Param> params; Block *body; bool entry;
+  Function *fn = nullptr;
+  FnDecl(Type r, const char *n, std::vector<Param> p, Block *b, bool e)
+      : ret(r), name(n), params(std::move(p)), body(b), entry(e) {}
+};
+
+class ConstDecl : public Node {
+ public:
+  Type t; DeclItem item;
+  ConstDecl(Type t, DeclItem i) : t(t), item(i) {}
+};
+
+class TransUnit {
+ public:
+  std::vector<FnDecl *> fns;
+  std::vector<ConstDecl *> consts;
+};
+
+// Builds the TAC of a translation unit (ast.cpp).
+Program *generateTAC(TransUnit *tu);
+
+#endif

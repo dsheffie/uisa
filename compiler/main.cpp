@@ -1,125 +1,152 @@
-/* File: main.cpp
+/* main.cpp: ucc, the uisa millicode compiler driver.
  *
- * This file defines the main() routine for the program and not much else.
+ *   ucc [-o out.s] [-v] [--dump-tac] [--timeout ms] file.c
+ *
+ * Pipeline: parse -> TAC -> CFG cleanup -> SSA -> SSA cleanups -> call-graph
+ * checks (no recursion, return-stack depth) -> legalization -> liveness and
+ * interference -> pressure check -> z3 allocation -> uisa assembly.
  */
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <string>
 
+#include "ast.h"
+#include "backend.h"
+#include "codegen.h"
 #include "errors.h"
-#include "manual_token.h"
-#include "options.h"
-#include "parser.h"
-#include "tac.h"
 
-/**
- * Prints information about a scanned token.
- */
-void token_print(int token, const char *text, YYSTYPE val, yyltype loc);
-
-/**
- * Initializes the compiler.
- */
-void init() {
-  scanner_init();
-  parser_init();
-  llvm::InitializeNativeTarget();
-  llvm::InitializeAllTargetMCs(); 
-  llvm::InitializeNativeTargetAsmPrinter(); 
+namespace spec {
+#include "uisa_intrinsics.inc"
 }
 
-/**
- * yylex() is then repeatedly called until EOF is reached; each token is printed
- * as it is lexed.
- */
-void print_all_tokens(){
-  int token;
-  while( (token = yylex()) != 0 )
-    token_print( token, yytext, yylval, yylloc );
+const char *g_srcName = "<stdin>";
+int g_errors = 0;
+
+void error(int line, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  if (line > 0) fprintf(stderr, "%s:%d: error: ", g_srcName, line);
+  else fprintf(stderr, "%s: error: ", g_srcName);
+  vfprintf(stderr, fmt, ap);
+  fprintf(stderr, "\n");
+  va_end(ap);
+  g_errors++;
 }
 
-/**
- * Entry point to the entire program.  We parse the command line and initialize
- * the scanner.
- *
- * @return 0 if requested action succeeded, -1 if an error was detected, 1 if
- * mode not yet implemented
- */
-int main(int argc, char *argv[]) {
-  options.parse( argc, argv );
-  init();
-  
-  if( options.getOutputType() == OUTPUT_LEX_TOKENS )
-    print_all_tokens();
-  else {
-    yyparse();
-    if( parser_get_result() ) {
-      switch( options.getOutputType() ) {
-      case OUTPUT_PARSE_TREE:
-	parser_get_result()->print(0);
-	break;
-	      
-      case OUTPUT_CHECK_ONLY:
-	parser_get_result()->check();
-	break;
-	    
-      case OUTPUT_TAC:
-      case OUTPUT_MIPS:
-	//need check to generate type information and
-	//scope information
-	if(parser_get_result()->check()){
-	  //only generate code if no semantic errors
-	  std::string foo;
-	  parser_get_result()->emitprog(foo);
-	}
-	break;
-      case OUTPUT_CPP:
-      default:
-	fprintf( stderr, "Output mode '%s' is not yet implemented.\n",
-		 output_type_to_string(options.getOutputType()) );
-	exit( 1 );
-      }
-    }
+void fatal(int line, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  if (line > 0) fprintf(stderr, "%s:%d: error: ", g_srcName, line);
+  else fprintf(stderr, "%s: error: ", g_srcName);
+  vfprintf(stderr, fmt, ap);
+  fprintf(stderr, "\n");
+  va_end(ap);
+  exit(1);
+}
+
+extern FILE *yyin;
+extern int yyparse();
+extern TransUnit *parse_result;
+
+static void stopOnErrors() {
+  if (g_errors) {
+    fprintf(stderr, "%s: %d error%s\n", g_srcName, g_errors, g_errors == 1 ? "" : "s");
+    exit(1);
   }
-  
-    llvm::llvm_shutdown();
-    return( ReportError::NumErrors()==0 ? 0 : -1 );
 }
 
-/**
- * Prints information about a scanned token.
- */
-void token_print(int token, const char *text, YYSTYPE val, yyltype loc)
-{
-    char buffer[8];
-    snprintf( buffer, 8, "'%c'", (char)token );
-    const char *name = token >= T_Void ? token_to_string(token) : buffer;
-
-    printf( "%-12s line %d cols %d-%d is %s ",
-            text, loc.first_line, loc.first_column, loc.last_column, name );
-
-    switch(token) {
-    case T_IntConst:
-        printf("(value = %d)\n", val.intConst);
-        break;
-
-    case T_DblConst:
-        printf("(value = %g)\n", val.dblConst);
-        break;
-
-    case T_StrConst:
-        printf("(value = %s)\n", val.strConst);
-        break;
-
-    case T_BoolConst:
-        printf("(value = %s)\n", val.boolConst ? "true" : "false");
-        break;
-
-    case T_Identifier:
-        if (strcmp(text, val.identifier)) {
-            printf("(truncated to %s)\n", val.identifier);
-            break;
-        }
-
-    default:
-        printf("\n");
-        break;
+// No recursion; every chain of nested calls fits the hardware return stack.
+static void checkCallGraph(Program *p) {
+  std::map<Function *, int> state, depth;
+  std::vector<Function *> path;
+  std::function<int(Function *)> visit = [&](Function *f) -> int {
+    if (state[f] == 2) return depth[f];
+    if (state[f] == 1) {
+      std::string cyc;
+      bool on = false;
+      for (Function *g : path) {
+        if (g == f) on = true;
+        if (on) cyc += g->name + " -> ";
+      }
+      error(f->line, "recursion is not allowed in millicode: %s%s", cyc.c_str(), f->name.c_str());
+      return 0;
     }
+    state[f] = 1;
+    path.push_back(f);
+    int d = 0;
+    for (Function *g : f->callees) d = std::max(d, 1 + visit(g));
+    path.pop_back();
+    state[f] = 2;
+    return depth[f] = d;
+  };
+  for (Function *f : p->funcs) {
+    int d = visit(f);
+    int frames = f->isEntry ? d : d + 1;   // a helper is itself entered by a call
+    if (frames > spec::CALL_STACK_DEPTH)
+      error(f->line, "'%s' nests %d calls but the millicode return stack holds %d", f->name.c_str(), frames,
+            spec::CALL_STACK_DEPTH);
+  }
+}
+
+int main(int argc, char **argv) {
+  const char *outName = nullptr, *inName = nullptr;
+  bool verbose = false, dumpTac = false;
+  int timeoutMs = 60000;
+  for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "-o") && i + 1 < argc) outName = argv[++i];
+    else if (!strcmp(argv[i], "-v")) verbose = true;
+    else if (!strcmp(argv[i], "--dump-tac")) dumpTac = true;
+    else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) timeoutMs = atoi(argv[++i]);
+    else if (argv[i][0] == '-') {
+      fprintf(stderr, "usage: ucc [-o out.s] [-v] [--dump-tac] [--timeout ms] file.c\n");
+      return 2;
+    } else inName = argv[i];
+  }
+  if (!inName) {
+    fprintf(stderr, "usage: ucc [-o out.s] [-v] [--dump-tac] [--timeout ms] file.c\n");
+    return 2;
+  }
+  g_srcName = inName;
+  yyin = fopen(inName, "r");
+  if (!yyin) {
+    perror(inName);
+    return 1;
+  }
+  yyparse();
+  stopOnErrors();
+  Program *prog = generateTAC(parse_result);
+  stopOnErrors();
+  for (Function *f : prog->funcs) cleanCFG(f);
+  stopOnErrors();
+  for (Function *f : prog->funcs) buildSSA(f);
+  stopOnErrors();
+  for (Function *f : prog->funcs) optimizeSSA(f);
+  checkCallGraph(prog);
+  stopOnErrors();
+  for (Function *f : prog->funcs) {
+    legalize(f);
+    f->rebuildEdges();
+    computeLoopDepth(f);
+  }
+  if (dumpTac)
+    for (Function *f : prog->funcs) f->print(stderr);
+  AllocProblem ap;
+  buildAllocProblem(prog, ap);
+  stopOnErrors();
+  checkPressure(prog, ap);
+  stopOnErrors();
+  allocateRegisters(prog, ap, timeoutMs, verbose);
+  stopOnErrors();
+  verifyAllocation(prog, ap);
+  FILE *out = outName ? fopen(outName, "w") : stdout;
+  if (!out) {
+    perror(outName);
+    return 1;
+  }
+  emitProgram(prog, out, inName);
+  if (outName) fclose(out);
+  return 0;
 }
