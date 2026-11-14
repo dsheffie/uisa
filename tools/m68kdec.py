@@ -285,3 +285,62 @@ def _lineF(op):
 _LINES = {0: _line0, 1: _move, 2: _move, 3: _move, 4: _line4, 5: _line5, 6: _line6, 7: _line7,
           8: _line8, 9: lambda op: _addsub(op, "SUB"), 0xA: lambda op: Insn("LINE-A"),
           0xB: _lineB, 0xC: _lineC, 0xD: lambda op: _addsub(op, "ADD"), 0xE: _lineE, 0xF: _lineF}
+
+
+# --- instruction length ---------------------------------------------------------
+INDEXED = ("(d8,An,Xn)", "(d8,PC,Xn)")
+
+
+def _ext(name, size):
+    """Extension bytes an effective address adds (brief format for indexed modes)."""
+    if name in ("(d16,An)", "(d16,PC)", "abs.W") or name in INDEXED:
+        return 2
+    if name == "abs.L":
+        return 4
+    if name == "#imm":
+        return 4 if size == "L" else 2
+    return 0
+
+
+def length(op):
+    """Return (bytes, exact) for the instruction whose opword is `op`.
+
+    `exact` is False when the length depends on extension words the opword
+    does not describe: indexed modes (brief vs full format) and some FPU forms.
+    """
+    i = decode(op)
+    m, sz = i.mnem, i.size
+    exact = not (i.src in INDEXED or i.dst in INDEXED)
+    fixed = {"MOVEP": 4, "CAS2": 6, "MOVEC": 4, "RTD": 4, "STOP": 4, "PACK": 4, "UNPK": 4,
+             "PFLUSH": 2, "PTEST": 2, "CINV": 2, "CPUSH": 2}
+    if m in fixed:
+        return fixed[m], True
+    if m in ("ORI", "ANDI", "EORI") and i.dst in ("CCR", "SR"):
+        return 4, True
+    if m in ("CMP2/CHK2", "MOVES", "MULx", "DIVx"):
+        return 4 + _ext(i.src or i.dst, sz), exact
+    if m == "CAS" or m == "MOVEM" or m.startswith("BF"):
+        return 4 + _ext(i.dst if m != "MOVEM" or i.src == "list" else i.src, sz), exact
+    if m == "LINK":
+        return (4 if sz == "W" else 6), True
+    if m.startswith("DB"):
+        return 4, True
+    if m.startswith("TRAP") and m not in ("TRAP", "TRAPV"):
+        return {0x3A: 4, 0x3B: 6, 0x3C: 2}.get(op & 0x3F, 2), True
+    if m in ("BRA", "BSR") or (m.startswith("B") and sz in ("S", "W", "L") and len(m) <= 3):
+        return {"S": 2, "W": 4, "L": 6}[sz], True
+    if m == "FPU-gen":
+        e = ea_lo(op)
+        return 4 + _ext(e, "L"), e != "#imm" and e not in INDEXED
+    if m == "FBcc":
+        return (4 if sz == "W" else 6), True
+    if m == "FScc/FDBcc/FTRAPcc":
+        return 4, False
+    if m in ("FSAVE", "FRESTORE"):
+        return 2 + _ext(i.src or i.dst, None), exact
+    if m == "MOVE16":
+        return (4 if op & 0xFFF8 == 0xF620 else 6), True
+    # static bit ops carry a bit-number word; their EA is byte-sized
+    if m in ("BTST", "BCHG", "BCLR", "BSET") and i.src == "#imm":
+        return 4 + _ext(i.dst, "B"), exact
+    return 2 + _ext(i.src, sz) + _ext(i.dst, sz), exact

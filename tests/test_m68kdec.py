@@ -67,14 +67,26 @@ CASES = {
 }
 
 
+LENGTHS = {
+    0x4E75: 2, 0x2018: 2, 0x3E3C: 4, 0x203C: 6, 0x41E8: 4, 0xB0B9: 6, 0x6700: 4, 0x66FE: 2,
+    0x61FF: 6, 0x51C8: 4, 0x4CDF: 4, 0x4E56: 4, 0x4808: 6, 0x0C80: 6, 0x0800: 4, 0x46FC: 4,
+    0x4C00: 4, 0x23C8: 6, 0x2B6E: 6, 0xE9C0: 4, 0x0EF9: 8, 0xF280: 4, 0x0CFC: 6, 0x4E7A: 4,
+}
+
+
 def main():
     fails = 0
+    for op, want in LENGTHS.items():
+        got = m68kdec.length(op)[0]
+        if got != want:
+            print("%04x length: got %d want %d" % (op, got, want))
+            fails += 1
     for op, want in CASES.items():
         got = m68kdec.decode(op).form()
         if got != want:
             print("%04x: got %r want %r" % (op, got, want))
             fails += 1
-    print("test_m68kdec: %d cases, %d failures" % (len(CASES), fails))
+    print("test_m68kdec: %d cases, %d failures" % (len(CASES) + len(LENGTHS), fails))
     return 1 if fails else 0
 
 

@@ -63,6 +63,72 @@ def cmd_hot(a):
             print("   %08x  %5.2f%%  %04x  %s" % (pc, 100.0 * cnt / total, op, m68kdec.decode(op).form()))
 
 
+def cmd_lengths(a):
+    """Dynamic instruction-length distribution.
+
+    Lengths come from the opword (m68kdec.length). Where the opword cannot fix
+    the length (indexed modes, some FPU forms), the gap to the next executed PC
+    is used instead when it is plausible. Exact static lengths are also
+    checked against those gaps, as a test of the length decoder.
+    """
+    ranges = parse_ranges(a.exclude) if a.exclude else []
+    by_mode = {0: collections.defaultdict(lambda: [0, collections.Counter()]),
+               1: collections.defaultdict(lambda: [0, collections.Counter()])}
+    for pc, s, op, cnt in load(a.pchist):
+        if s == 1 and any(lo <= pc <= hi for lo, hi in ranges):
+            continue
+        by_mode[s][pc][0] += cnt
+        by_mode[s][pc][1][op] += cnt
+    for s, name in ((0, "user"), (1, "supervisor")):
+        pcs = sorted(by_mode[s])
+        dist = collections.Counter()
+        agree = disagree = 0
+        idx_total = idx_full = 0
+        bad = collections.Counter()
+        for k, pc in enumerate(pcs):
+            cnt, ops = by_mode[s][pc]
+            op = ops.most_common(1)[0][0]
+            static, exact = m68kdec.length(op)
+            gap = pcs[k + 1] - pc if k + 1 < len(pcs) else None
+            n = static
+            if exact:
+                if gap is not None and gap <= 22:
+                    if gap == static:
+                        agree += cnt
+                    else:
+                        disagree += cnt
+                        bad[m68kdec.decode(op).form()] += cnt
+            elif gap is not None and static <= gap <= 22:
+                n = gap
+            ins = m68kdec.decode(op)
+            if ins.src in m68kdec.INDEXED or ins.dst in m68kdec.INDEXED:
+                idx_total += cnt
+                if n > static:
+                    idx_full += cnt
+            dist[n] += cnt
+        total = sum(dist.values())
+        mean = sum(n * c for n, c in dist.items()) / max(1, total)
+        print("## %s: %d instructions, mean length %.2f bytes" % (name, total, mean))
+        print("")
+        print("| Bytes | % | Cumulative % |")
+        print("|---|---|---|")
+        cum = 0
+        for n in sorted(dist):
+            cum += dist[n]
+            print("| %d | %.2f | %.2f |" % (n, 100.0 * dist[n] / total, 100.0 * cum / total))
+        print("")
+        checked = agree + disagree
+        print("Length decoder vs. next-PC gap: %.2f%% of %d checkable instructions agree." %
+              (100.0 * agree / max(1, checked), checked))
+        if bad:
+            print("Most common mismatches (often a taken branch or code that was never reached): " +
+                  ", ".join("`%s` %.3f%%" % (f, 100.0 * c / total) for f, c in bad.most_common(5)))
+        if idx_total:
+            print("Indexed addressing: %.2f%% of instructions; %.1f%% of those appear to use the full format." %
+                  (100.0 * idx_total / total, 100.0 * idx_full / idx_total))
+        print("")
+
+
 def parse_ranges(text):
     out = []
     for part in text.split(","):
@@ -102,8 +168,11 @@ def main():
     f.add_argument("--exclude", required=True)
     f.add_argument("--mode", choices=["super", "user", "all"], default="super")
     f.add_argument("-o", "--out", required=True)
+    ln = sub.add_parser("lengths")
+    ln.add_argument("pchist")
+    ln.add_argument("--exclude", default="", help="supervisor PC ranges to leave out (idle loop, ROM)")
     a = ap.parse_args()
-    {"hot": cmd_hot, "filter": cmd_filter}[a.cmd](a)
+    {"hot": cmd_hot, "filter": cmd_filter, "lengths": cmd_lengths}[a.cmd](a)
 
 
 if __name__ == "__main__":
