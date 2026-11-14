@@ -1,6 +1,7 @@
 /* scanner.l: the C-subset scanner (forked from Decaf's scanner.l). */
 
 %{
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include "ast.h"
@@ -33,6 +34,8 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 "s8"                { yylval.type = new Type(8, true); return T_Type; }
 "s16"               { yylval.type = new Type(16, true); return T_Type; }
 "s32"               { yylval.type = new Type(32, true); return T_Type; }
+"u64"               { yylval.type = new Type(64, false); return T_Type; }
+"s64"               { yylval.type = new Type(64, true); return T_Type; }
 "int"               { yylval.type = new Type(32, true); return T_Type; }
 "unsigned"          { yylval.type = new Type(32, false); return T_Type; }
 "const"             { return T_Const; }
@@ -68,15 +71,28 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 [-+*/%=,;!~<>()\[\]{}:?&|^] { return yytext[0]; }
 
  /* -------------------- Constants ------------------------------ */
-(0[xX]{HEX_DIGIT}+|{DIGIT}+)[uU]? {
+(0[xX]{HEX_DIGIT}+|{DIGIT}+)([uU]|[uU]?[lL][lL]|[lL][lL][uU])? {
+                      /* C's rules with s32/u32/s64/u64 standing in for int/unsigned/long long:
+                         the first type that holds the value, unsigned types only for hex
+                         and octal constants or with a u suffix; ll forces 64 bits */
                       char *end;
+                      errno = 0;
                       unsigned long long v = strtoull(yytext, &end, 0);
-                      bool hex = yytext[0] == '0' && (yytext[1] == 'x' || yytext[1] == 'X');
-                      bool u = *end == 'u' || *end == 'U';
-                      if (v > 0xffffffffull) error(yylineno, "integer constant %s does not fit 32 bits", yytext);
-                      yylval.lit.value = (uint32_t)v;
-                      yylval.lit.isUnsigned = u || v > 0x7fffffffull;
-                      (void)hex;
+                      if (errno == ERANGE) error(yylineno, "integer constant %s does not fit 64 bits", yytext);
+                      bool decimal = yytext[0] != '0' || yytext[1] == 0;
+                      bool u = strchr(end, 'u') || strchr(end, 'U');
+                      bool ll = strchr(end, 'l') || strchr(end, 'L');
+                      int bits = 32;
+                      bool isU = false;
+                      if (!ll && !u && v <= 0x7fffffffull) bits = 32;
+                      else if (!ll && v <= 0xffffffffull && (u || !decimal)) isU = true;
+                      else if (!u && v <= 0x7fffffffffffffffull) bits = 64;
+                      else if (u || !decimal) { bits = 64; isU = true; }
+                      else error(yylineno, "integer constant %s does not fit s64", yytext);
+                      if (ll && bits == 32) bits = 64;
+                      yylval.lit.value = v;
+                      yylval.lit.bits = bits;
+                      yylval.lit.isUnsigned = isU;
                       return T_IntConst; }
 
 {IDENTIFIER}        { yylval.ident = strdup(yytext); return T_Identifier; }

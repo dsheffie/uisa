@@ -5,7 +5,8 @@
  * declarations) and the "each node emits its own TAC" structure are Decaf's;
  * the Java object model is gone. Semantic checks happen during TAC
  * generation (ast.cpp), which also applies C's integer promotions and
- * conversions so that the TAC is plain 32-bit arithmetic.
+ * conversions so that the TAC is plain 32-bit arithmetic. 64-bit values are
+ * pairs of 32-bit words from here on: the back end never sees them.
  */
 #ifndef UCC_AST_H
 #define UCC_AST_H
@@ -28,6 +29,7 @@ struct Type {
   static Type voidType() { Type t; t.isVoid = true; return t; }
   static Type s32() { return Type(32, true); }
   static Type u32() { return Type(32, false); }
+  bool is64() const { return !isVoid && bits == 64; }
   std::string str() const;
   bool operator==(const Type &o) const { return isVoid == o.isVoid && bits == o.bits && sign == o.sign; }
 };
@@ -37,11 +39,13 @@ class Block;
 
 // The value of an expression: a TAC operand plus its C type. Every value is
 // kept canonical for its type (u8 zero-extended, s8 sign-extended, ...), so
-// integer promotion never needs an instruction.
+// integer promotion never needs an instruction. A 64-bit value is two words:
+// `op` holds the low 32 bits and `hi` the high 32 bits.
 struct EV {
   Operand op;
   Type ty;
-  bool isConst() const { return op.isImm(); }
+  Operand hi;
+  bool isConst() const { return op.isImm() && (!ty.is64() || hi.isImm()); }
 };
 
 class Node {
@@ -61,8 +65,8 @@ class Expr : public Node {
 
 class IntLit : public Expr {
  public:
-  uint32_t value; bool isUnsigned;
-  IntLit(uint32_t v, bool u) : value(v), isUnsigned(u) {}
+  uint64_t value; Type ty;
+  IntLit(uint64_t v, Type t) : value(v), ty(t) {}
   EV gen(CG &cg) override;
 };
 

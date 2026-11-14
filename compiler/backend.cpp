@@ -112,7 +112,7 @@ void legalize(Function *f) {
     for (Instr *i : b->ins) {
       auto &a = i->a;
       switch (i->op) {
-        case Op::Phi: case Op::Copy: case Op::PWrite: case Op::Jmp: case Op::Stop:
+        case Op::Phi: case Op::Copy: case Op::PWrite: case Op::Jmp: case Op::Stop: case Op::CallRes:
           break;
         case Op::Add:
           needReg(i, 0);
@@ -171,7 +171,7 @@ void legalize(Function *f) {
           needReg(i, 1);
           break;
         case Op::Ret:
-          if (!a.empty()) needReg(i, 0);
+          for (size_t k = 0; k < a.size(); k++) needReg(i, k);
           break;
         case Op::Call:
           for (size_t k = 0; k < a.size(); k++) needReg(i, k);
@@ -309,10 +309,10 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
     ap.edges.insert({a, b});
   };
   for (Function *f : p->funcs) {
-    if (f->returnsValue && !f->retReg) f->retReg = f->newReg("ret");
+    while ((int)f->retRegs.size() < f->retWords) f->retRegs.push_back(f->newReg("ret"));
     for (Reg *r : f->entryRegs) addVal(f, r);
     for (Reg *r : f->params) addVal(f, r);
-    if (f->retReg) addVal(f, f->retReg);
+    for (Reg *r : f->retRegs) addVal(f, r);
     for (BasicBlock *b : f->blocks)
       for (Instr *i : b->ins) {
         if (i->dst) addVal(f, i->dst);
@@ -321,6 +321,7 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
       }
   }
   for (Function *f : p->funcs) {
+    for (size_t k = 1; k < f->retRegs.size(); k++) edge(f->retRegs[0], f->retRegs[k]);
     FnLive L;
     computeLiveness(f, L);
     int maxLive = 0, worstLine = 0;
@@ -340,11 +341,18 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
         if (i->op == Op::Call) {
           AllocProblem::CallSite cs{f, i->callee, {}, i->line};
           for (Reg *r : live)
-            if (r != i->dst) cs.liveAcross.push_back(r);
+            if (r != i->dst) cs.liveAcross.push_back(r);   // a CallRes result is defined after the call
           ap.calls.push_back(cs);
           for (size_t k = 0; k < i->a.size() && k < i->callee->params.size(); k++)
             if (i->a[k].isReg()) ap.prefs.push_back({i->a[k].r, i->callee->params[k], w});
-          if (i->dst && i->callee->retReg) ap.prefs.push_back({i->dst, i->callee->retReg, w});
+          if (i->dst && !i->callee->retRegs.empty()) ap.prefs.push_back({i->dst, i->callee->retRegs[0], w});
+        }
+        if (i->op == Op::CallRes) {
+          // both result words are copied out of the return registers together
+          ap.prefs.push_back({i->dst, i->callee->retRegs[1], w});
+          auto it2 = std::find(b->ins.begin(), b->ins.end(), i);
+          if (it2 == b->ins.begin() || (*(it2 - 1))->op != Op::Call) fatal(i->line, "internal: CallRes not after its call");
+          if (Reg *d1 = (*(it2 - 1))->dst) edge(d1, i->dst);
         }
         if (i->dst) {
           std::set<Reg *> after = live;
@@ -362,7 +370,9 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
           if (i->op == Op::Copy && i->a[0].isReg()) ap.prefs.push_back({i->dst, i->a[0].r, w});
           live.erase(i->dst);
         }
-        if (i->op == Op::Ret && !i->a.empty() && i->a[0].isReg()) ap.prefs.push_back({i->a[0].r, f->retReg, w});
+        if (i->op == Op::Ret)
+          for (size_t k = 0; k < i->a.size(); k++)
+            if (i->a[k].isReg()) ap.prefs.push_back({i->a[k].r, f->retRegs[k], w});
         for (auto &o : i->a)
           if (o.isReg()) live.insert(o.r);
         note(live, i->line);
@@ -406,7 +416,7 @@ void checkPressure(Program *p, AllocProblem &ap) {
   std::function<int(Function *)> needOf = [&](Function *f) -> int {
     if (need.count(f)) return need[f];
     int n = ap.maxLive[f];
-    if (f->retReg) n = std::max(n, 1);
+    n = std::max(n, (int)f->retRegs.size());
     std::string w = f->name + " alone";
     for (auto &cs : ap.calls) {
       if (cs.caller != f) continue;
@@ -568,7 +578,7 @@ static std::string R(Reg *r) { return "x" + std::to_string(r->color); }
 
 static std::string blockLabel(BasicBlock *b) { return b->fn->name + "__" + std::to_string(b->id); }
 
-static void emitInstr(Emitter &E, Instr *i) {
+static void emitInstr(Emitter &E, Instr *i, Instr *next) {
   auto &a = i->a;
   std::string d = i->dst ? R(i->dst) : "";
   auto ri = [&](const char *rr, const char *ii) {   // reg-reg or reg-imm form
@@ -663,9 +673,14 @@ static void emitInstr(Emitter &E, Instr *i) {
       for (size_t k = 0; k < a.size(); k++) moves.push_back({R(i->callee->params[k]), R(a[k])});
       E.parallelCopy(moves);
       E.text("call " + i->callee->name);
-      if (i->dst) E.mov(d, R(i->callee->retReg));
+      moves.clear();
+      if (i->dst) moves.push_back({d, R(i->callee->retRegs[0])});
+      if (next && next->op == Op::CallRes) moves.push_back({R(next->dst), R(i->callee->retRegs[1])});
+      E.parallelCopy(moves);
       break;
     }
+    case Op::CallRes:   // emitted with its Call
+      break;
     case Op::PWrite:
       if (a[0].isImm()) E.li(regName(i->phys), a[0].imm);
       else E.mov(regName(i->phys), R(a[0]));
@@ -685,10 +700,11 @@ static void emitFunction(Function *f, FILE *out) {
   for (BasicBlock *b : f->blocks) {
     Emitter B;
     B.curLine = line;
-    for (Instr *i : b->ins) {
+    for (size_t k = 0; k < b->ins.size(); k++) {
+      Instr *i = b->ins[k];
       if (i->line) B.curLine = i->line;
       if (i->isTerm()) break;
-      emitInstr(B, i);
+      emitInstr(B, i, k + 1 < b->ins.size() ? b->ins[k + 1] : nullptr);
     }
     if (b->succs.size() == 1) {
       BasicBlock *s = b->succs[0];
@@ -740,8 +756,12 @@ static void emitFunction(Function *f, FILE *out) {
         break;
       }
       case Op::Ret:
-        if (!t->a.empty()) E.mov(R(f->retReg), R(t->a[0]));
+      {
+        std::vector<std::pair<std::string, std::string>> moves;
+        for (size_t k = 0; k < t->a.size(); k++) moves.push_back({R(f->retRegs[k]), R(t->a[k])});
+        E.parallelCopy(moves);
         E.text("ret");
+      }
         break;
       case Op::Stop:
         break;

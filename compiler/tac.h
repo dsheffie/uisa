@@ -5,7 +5,8 @@
  * had a separate renamed form (rVariable); here one Reg class serves both:
  * before SSA construction a Reg is a source variable that may be assigned
  * many times, afterwards every Reg has exactly one definition. All values
- * are 32 bits; the front end has already applied C's conversions.
+ * are 32 bits; the front end has already applied C's conversions and split
+ * 64-bit values into pairs of 32-bit words.
  */
 #ifndef UCC_TAC_H
 #define UCC_TAC_H
@@ -74,12 +75,13 @@ enum class Op {
   Sext8, Sext16, Zext8, Zext16,
   Intrin,                                        // [dst =] intrinsic(a...)
   Call,                                          // [dst =] callee(a...)
+  CallRes,                                       // dst = second result word of the Call just before
   Phi,                                           // dst = phi(a[i] from preds[i])
   PWrite,                                        // phys register `phys` = a0
   // terminators
   Br,                                            // if (a0 cond a1) goto t else f
   Jmp,                                           // goto t
-  Ret,                                           // return [a0]
+  Ret,                                           // return [a0 [, a1]]
   Stop,                                          // control ended in a noreturn intrinsic
 };
 
@@ -127,11 +129,12 @@ class Function {
   std::string name;
   bool isEntry = false;          // millicode entry point (dispatched, never called)
   bool returnsValue = false;
+  int retWords = 0;              // 32-bit words returned (2 for 64-bit types)
   int line = 0;
   std::vector<Reg *> params;     // SSA values defined at entry (after construction)
   std::vector<Reg *> paramVars;  // the source variables of the parameters
   std::vector<Reg *> entryRegs;  // entry-ABI values (precolored), defined at entry
-  Reg *retReg = nullptr;         // the register a value is returned in
+  std::vector<Reg *> retRegs;    // the registers the result words are returned in
   std::vector<BasicBlock *> blocks;
   std::vector<Reg *> regs;
   std::set<Function *> callees;

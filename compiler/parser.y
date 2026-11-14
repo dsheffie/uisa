@@ -2,7 +2,7 @@
  *
  * The Java object model (classes, interfaces, arrays, strings, New, Print)
  * is gone; what is left is C's statements and expressions over the integer
- * types u8 u16 u32 s8 s16 s32 (int = s32, unsigned = u32).
+ * types u8 u16 u32 u64 s8 s16 s32 s64 (int = s32, unsigned = u32).
  */
 
 %{
@@ -21,7 +21,7 @@ TransUnit *parse_result = nullptr;
   Type *type;
   char *ident;
   int op;
-  struct { uint32_t value; bool isUnsigned; } lit;
+  struct { uint64_t value; int bits; bool isUnsigned; } lit;
   Expr *expr;
   Stmt *stmt;
   Block *block;
@@ -189,7 +189,7 @@ PostfixExpr : PrimaryExpr                { $$ = $1; }
             | PostfixExpr T_Inc          { $$ = new IncDecExpr(false, '+', $1); }
             | PostfixExpr T_Dec          { $$ = new IncDecExpr(false, '-', $1); }
             ;
-PrimaryExpr : T_IntConst                 { $$ = new IntLit($1.value, $1.isUnsigned); }
+PrimaryExpr : T_IntConst                 { $$ = new IntLit($1.value, Type($1.bits, !$1.isUnsigned)); }
             | T_Identifier               { $$ = new VarRef($1); }
             | '(' Expr ')'               { $$ = $2; }
             ;

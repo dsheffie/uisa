@@ -99,7 +99,7 @@ bool Instr::hasSideEffects() const {
 static const char *opName(Op op) {
   static const char *n[] = {"copy", "add", "sub", "mul", "div", "divu", "rem", "remu", "and", "or", "xor",
                             "shl", "shr", "sar", "set", "sext8", "sext16", "zext8", "zext16", "intrin",
-                            "call", "phi", "pwrite", "br", "jmp", "ret", "stop"};
+                            "call", "callres", "phi", "pwrite", "br", "jmp", "ret", "stop"};
   return n[(int)op];
 }
 
@@ -109,7 +109,7 @@ std::string Instr::str() const {
   s += opName(op);
   if (op == Op::Set || op == Op::Br) s += std::string(".") + condName(cond);
   if (op == Op::Intrin) s += std::string(" ") + in->name;
-  if (op == Op::Call) s += " " + std::string(callee ? "fn" : "?");
+  if (op == Op::Call || op == Op::CallRes) s += " " + (callee ? callee->name : std::string("?"));
   if (op == Op::PWrite) s += std::string(" ") + regName(phys);
   for (size_t i = 0; i < a.size(); i++) {
     s += (i ? ", " : " ") + a[i].str();

@@ -32,12 +32,16 @@ Labels must be unique across all sources (checked). `millicode/bitfield.c`
 
 ## Language
 
-- Types: `u8 u16 u32 s8 s16 s32`, plus `int` (= `s32`), `unsigned` (= `u32`)
-  and `void`. Every value is kept canonical for its type (u8 zero-extended,
-  s8 sign-extended, ...), so promotion costs nothing.
+- Types: `u8 u16 u32 u64 s8 s16 s32 s64`, plus `int` (= `s32`), `unsigned`
+  (= `u32`) and `void`. Every value is kept canonical for its type (u8
+  zero-extended, s8 sign-extended, ...), so promotion costs nothing.
+- Integer constants follow C with `s32 u32 s64 u64` in place of `int
+  unsigned long long unsigned long long`: the first type that holds the value
+  (unsigned only for hex/octal or with a `u` suffix); `ll`/`ull` force 64 bits.
 - C's integer promotions and usual arithmetic conversions; casts. `>>` is
   arithmetic on signed and logical on unsigned (promoted) operands; `/ %`
-  divide signed or unsigned the same way.
+  divide signed or unsigned the same way. `s64` holds every `u32`, so
+  `s64 op u32` is `s64`, as in C.
 - Operators: `+ - * / % & | ^ ~ << >> ! && || ?:`, comparisons, `=` and the
   compound assignments, prefix and postfix `++ --`.
 - Statements: blocks, declarations anywhere (with initializers), `if/else`,
@@ -50,9 +54,28 @@ Labels must be unique across all sources (checked). `millicode/bitfield.c`
 - `entry void name(void)` declares a millicode entry point: it is dispatched
   to (never called), may use the entry-ABI intrinsics, cannot return, and
   every path must end in a no-return intrinsic (`__gexit`, `__gfault`, ...).
-- Not in the language: pointers, arrays, structs, floats, 64-bit types,
+- Not in the language: pointers, arrays, structs, floats,
   globals that are not constants, `goto`, the comma operator, char and string
   literals, the preprocessor.
+
+## 64-bit types
+
+The front end splits every `u64`/`s64` value into two 32-bit words (a
+variable becomes two source variables), so SSA, allocation and emission only
+ever see 32-bit values and each word is allocated, and dies, on its own.
+
+| operation | lowering |
+|---|---|
+| `+ -` | word add/sub, carry/borrow with `sltu` (4 instructions) |
+| `* ` | `mul` + `mulhu` + two cross `mul`s; `(u64)a * b` with 32-bit operands is `mul` + `mulhu` |
+| `<< >>` constant | two or three word shifts |
+| `<< >>` variable | branch-free, 14 instructions; the count is taken mod 64 |
+| `/ %` | an inline 64-iteration shift-subtract loop, with a `divu`/`remu` fast path when both high words are 0; signed divides the magnitudes. Unsigned powers of two become shifts and masks. Division by zero is undefined, as in C |
+| comparisons | as branches: high words first, then the low words unsigned; as values: `slt`/`sltu` on the high words, combined |
+| calls | a 64-bit argument takes two parameter registers (low word first); a 64-bit result comes back in two return registers, read by `Call` + `CallRes` and copied out as one parallel copy |
+
+Intrinsic arguments take the low word of a 64-bit value (C conversion to
+`u32`).
 
 ## Intrinsics
 
@@ -138,12 +161,13 @@ which the compiler emits itself) and `lui/auipc` is available as
 
 ## Not done yet
 
-- **64-bit types.** SoftFloat needs `u64` (register pairs, `mulhu`, carries).
+- **64-bit polish.** `u64 / u32` and 128-bit helpers (`mul64To128`,
+  `estimateDiv128To64`) go through the general 64-bit loop; a
+  divide-by-32-bit-divisor path (two `divu` steps) would be much faster.
 - **Scratch memory.** Explicit hidden-memory storage (`scratch_base`) for
   state larger than the register file; no syntax for it yet.
 - **The SoftFloat milestone.** 80-bit extended precision for the 68040 FPU is
-  the next real program; it will need 64-bit types and probably arrays in
-  scratch memory, and will show whether z3 allocation scales (bitfield.c: 150
+  the next real program; it will probably need arrays in scratch memory, and will show whether z3 allocation scales (bitfield.c: 150
   values, well under a second).
 - **Faults before commits** is not checked yet (intro.md says the compiler
   will check it on SSA).
