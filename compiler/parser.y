@@ -40,7 +40,7 @@ static void declareTypeName(const char *n, const Type &t) {
   TransUnit *tu;
 }
 
-%token T_Void T_Const T_Entry T_Struct T_Typedef T_Inline T_While T_Do T_For T_If T_Else T_Switch T_Case T_Default
+%token T_Void T_Const T_Entry T_Struct T_Typedef T_Inline T_Goto T_While T_Do T_For T_If T_Else T_Switch T_Case T_Default
 %token T_Return T_Break T_Continue T_Le T_Ge T_Eq T_Ne T_And T_Or T_Shl T_Shr T_Inc T_Dec
 %token <type> T_Type
 %token <op> T_OpAssign
@@ -147,6 +147,8 @@ Stmt        : Block                      { $$ = $1; }
             | T_Default ':'              { $$ = new CaseLabel(nullptr); }
             | T_Return OptExpr ';'       { $$ = new ReturnStmt($2); }
             | T_Break ';'                { $$ = new BreakStmt(); }
+            | T_Goto T_Identifier ';'    { $$ = new GotoStmt($2); }
+            | T_Identifier ':' Stmt      { $$ = new LabelStmt($1, $3); }
             | T_Continue ';'             { $$ = new ContinueStmt(); }
             ;
 

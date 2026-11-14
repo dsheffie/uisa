@@ -5,6 +5,9 @@ VMDIR ?= /tmp/uisa_obj_tb_$(USER)
 # everyday builds, -O2 the z3 search for deploy builds (`make release`)
 UCCFLAGS ?= -O0
 export UCCFLAGS
+# Previous's source: tests/softfloat compares the FPU millicode with its SoftFloat
+PREVIOUS_SRC ?= $(HOME)/code/previous/src
+export PREVIOUS_SRC
 GEN := build/uisa_pkg.sv build/uisa.h build/uisa_sem.inc doc/uisa.md build/vectors.hex
 
 all: test
@@ -32,6 +35,7 @@ test: $(GEN) compiler
 	c++ -std=c++17 -O1 -Wall -Wextra -Ibuild -o build/test_cxx tests/test_cxx.cc
 	./build/test_cxx
 	python3 compiler/tests/test_ucc.py
+	python3 tests/softfloat/test_fx80.py 20000
 	python3 tools/gen_model.py >/dev/null
 	python3 tools/gen_millicode.py >/dev/null
 	c++ -std=c++17 -O1 -Ibuild -Imodel -o build/test_shadow tests/test_shadow.cc model/uisa_shadow.cc

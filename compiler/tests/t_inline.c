@@ -24,6 +24,19 @@ inline u32 nested(u32 x, u32 &acc) {   // inline calling inline, with early retu
   return (u32)h + x;
 }
 
+inline u32 jumpy(u32 a, u32 b) {   // SoftFloat-style forward gotos
+  if (a < b) goto bBigger;
+  if (a == b) goto same;
+  return a - b;
+ bBigger:
+  b -= a;
+  goto out;
+ same:
+  return 0;
+ out:
+  return b + 100;
+}
+
 entry void t_inline(void) {
   bits64 a = ((bits64)__rdg(D1) << 32) | __rdg(D0);
   bits64 b = ((bits64)__rdg(D3) << 32) | __rdg(D2);
@@ -58,6 +71,7 @@ entry void t_inline(void) {
   __wrg(D7, r.lo ^ r.hi);
   __wrg(A0, n);
   __wrg(A1, acc);
+  __wrg(A2, jumpy(__rdg(A2), __rdg(A3)) + jumpy(__rdg(A4) & 7, __rdg(A5) & 7));
   __wrg(GPC, __next_pc());
   __gexit();
 }

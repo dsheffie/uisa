@@ -67,6 +67,7 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 "struct"            { return T_Struct; }
 "typedef"           { return T_Typedef; }
 "inline"            { return T_Inline; }
+"goto"              { return T_Goto; }
 "entry"             { return T_Entry; }
 "while"             { return T_While; }
 "do"                { return T_Do; }
@@ -79,7 +80,7 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 "return"            { return T_Return; }
 "break"             { return T_Break; }
 "continue"          { return T_Continue; }
-"float"|"double"|"long"|"char"|"short"|"union"|"goto"|"static" {
+"float"|"double"|"long"|"char"|"short"|"union"|"static" {
                       error(yylineno, "'%s' is not part of the millicode C subset", yytext); }
 
  /* -------------------- Operators ----------------------------- */

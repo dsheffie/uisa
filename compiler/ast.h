@@ -258,6 +258,20 @@ class ReturnStmt : public Stmt {
   void gen(CG &cg) override;
 };
 
+class GotoStmt : public Stmt {
+ public:
+  std::string label;
+  GotoStmt(const char *l) : label(l) {}
+  void gen(CG &cg) override;
+};
+
+class LabelStmt : public Stmt {   // label: stmt
+ public:
+  std::string label; Stmt *s;
+  LabelStmt(const char *l, Stmt *s) : label(l), s(s) {}
+  void gen(CG &cg) override;
+};
+
 class BreakStmt : public Stmt {
  public:
   void gen(CG &cg) override;

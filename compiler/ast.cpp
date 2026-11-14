@@ -57,6 +57,11 @@ struct InlineFrame {
   BasicBlock *join;         // where `return` goes
 };
 
+// goto labels of one function body or one inline expansion
+struct LabelInfo { BasicBlock *b = nullptr; bool defined = false; int line = 0; };
+using LabelMap = std::map<std::string, LabelInfo>;
+static void checkLabels(LabelMap &m);
+
 struct SwitchCtx {
   std::map<CaseLabel *, BasicBlock *> blocks;
 };
@@ -74,6 +79,7 @@ class CG {
   std::vector<InlineFrame *> inl;   // inline expansions, innermost last
   FnDecl *rootFd = nullptr;         // the function being compiled (inline bodies included)
   size_t floor = 1;                 // innermost scope a body may see (below it: only globals)
+  LabelMap *labels = nullptr;       // goto labels of the body being generated
   int line = 0;
 
   Instr *emit(Instr *i) {
@@ -1126,7 +1132,11 @@ EV CallExpr::genInline(CG &cg, FnDecl *callee) {
   }
   cg.fd = callee;
   cg.inl.push_back(&fr);
+  LabelMap labels, *savedLabels = cg.labels;
+  cg.labels = &labels;
   callee->body->gen(cg);
+  checkLabels(labels);
+  cg.labels = savedLabels;
   cg.line = callee->line;
   if (!cg.cur->terminated()) {
     if (callee->ret.isVoid) {
@@ -1404,6 +1414,38 @@ void ReturnStmt::gen(CG &cg) {
   cg.endWithDeadBlock();
 }
 
+static BasicBlock *labelBlock(CG &cg, const std::string &n, int line) {
+  LabelInfo &l = (*cg.labels)[n];
+  if (!l.b) {
+    l.b = cg.block(n.c_str());
+    l.line = line;
+  }
+  return l.b;
+}
+
+// Every goto names a label of the same body.
+static void checkLabels(LabelMap &m) {
+  for (auto &l : m)
+    if (!l.second.defined) error(l.second.line, "goto to undefined label '%s'", l.first.c_str());
+}
+
+void GotoStmt::gen(CG &cg) {
+  cg.line = line;
+  cg.jmp(labelBlock(cg, label, line));
+  cg.endWithDeadBlock();
+}
+
+void LabelStmt::gen(CG &cg) {
+  cg.line = line;
+  LabelInfo &l = (*cg.labels)[label];
+  if (l.defined) error(line, "label '%s' defined twice", label.c_str());
+  BasicBlock *b = labelBlock(cg, label, line);
+  (*cg.labels)[label].defined = true;
+  cg.jmp(b);
+  cg.cur = b;
+  s->gen(cg);
+}
+
 void BreakStmt::gen(CG &cg) {
   cg.line = line;
   if (cg.breaks.empty()) error(line, "break outside a loop or switch");
@@ -1474,7 +1516,10 @@ Program *generateTAC(TransUnit *tu) {
       symWords(s, cg.fn->paramVars);
       cg.declare(p.name, s, fd->line);
     }
+    LabelMap labels;
+    cg.labels = &labels;
     fd->body->gen(cg);
+    checkLabels(labels);
     cg.line = fd->line;
     if (!cg.cur->terminated()) {
       // falling off the end: fine for void helpers, an error otherwise
