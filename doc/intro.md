@@ -148,8 +148,9 @@ frame.
 ## Regenerating
 
 ```
-make            # validate the spec, regenerate build/, run the tests
+make            # validate the spec, regenerate build/ and doc/uisa.md, run the tests
 ```
 
-Edit `spec/uisa.yaml` (the ISA) or this file (the rationale); never edit
-`build/`.
+Edit `spec/uisa.yaml` (the ISA) or `doc/intro.md` (the rationale); never edit
+`build/` or `doc/uisa.md`. The generated doc is committed so it can be read on
+GitHub; commit it together with the spec change that produced it.

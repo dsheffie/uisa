@@ -1,7 +1,7 @@
 # Regenerate everything from spec/uisa.yaml and run the checks.
 # Verilator's generated makefiles cannot live under a path containing spaces.
 VMDIR ?= /tmp/uisa_obj_tb_$(USER)
-GEN := build/uisa_pkg.sv build/uisa.h build/uisa_sem.inc build/uisa.md build/vectors.hex
+GEN := build/uisa_pkg.sv build/uisa.h build/uisa_sem.inc doc/uisa.md build/vectors.hex
 
 all: test
 
