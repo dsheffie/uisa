@@ -23,6 +23,9 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import uisa  # noqa: E402
 
 UCC = os.path.join(ROOT, "build", "compiler", "ucc")
+# the tests check correctness, not allocation quality: a smaller z3 budget
+# keeps `make` fast (and exercises the neighbourhood search on the big tests)
+UCC_FLAGS = ["--rlimit", "30000000"]
 OUT = os.path.join(ROOT, "build", "ucc_tests")
 
 
@@ -58,7 +61,7 @@ def main():
             first = f.readline()
         m = re.match(r"//\s*expect:\s*(.*)", first)
         expect = m.group(1).strip() if m else "?"
-        p = subprocess.run([UCC, src, "-o", os.devnull], capture_output=True, text=True)
+        p = subprocess.run([UCC] + UCC_FLAGS + [src, "-o", os.devnull], capture_output=True, text=True)
         name = os.path.basename(src)
         if p.returncode == 0 or expect not in p.stderr:
             print("FAIL %s: expected an error containing %r, got (rc %d):\n%s" % (name, expect, p.returncode, p.stderr))
@@ -73,7 +76,7 @@ def main():
     for src in srcs:
         name = os.path.splitext(os.path.basename(src))[0]
         asm = os.path.join(OUT, name + ".s")
-        if subprocess.call([UCC, src, "-o", asm]) != 0:
+        if subprocess.call([UCC] + UCC_FLAGS + [src, "-o", asm]) != 0:
             print("FAIL %s: does not compile" % name)
             fails += 1
             continue

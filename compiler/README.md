@@ -137,16 +137,34 @@ which the compiler emits itself) and `lui/auipc` is available as
   a register. Each function's parameter and return registers are part of the
   solution, so there is no fixed calling convention and no caller/callee-saved
   split. The result is verified independently of z3 before emission.
-- **Greedy start, deterministic budget.** Before z3 runs, a greedy allocator
-  colors functions callees first and values in dominance order (chordal
-  coloring), each value taking a register its colored preference partners
-  use, then improves single values locally. z3 starts from that solution
-  and has a resource budget (`--rlimit`, default 30M, roughly 25 s), not a
-  wall-clock timeout, so the same source always gives the same millicode.
-  When the budget runs out the greedy solution is used. z3 proves optimal
-  allocations up to about 650 values (`t_u64div`, 8 s); beyond that, expect
-  the greedy result (`t_u64div2`: 556 values, weighted move cost 270 of
-  3139).
+- **How the allocation is found.** Three stages, all deterministic (z3 runs
+  under a resource budget, `--rlimit`, default 300M, never a wall-clock
+  timeout, and the problem is keyed by value index, so the same source gives
+  the same millicode on every machine):
+  1. *Greedy.* Functions callees first, values in dominance order (chordal
+     coloring), each taking a register its colored preference partners use;
+     then single values move where more partners are. Always feasible when
+     the pressure checks pass; it is z3's starting point and the fallback.
+  2. *Whole program.* Up to 700 values, z3 gets a third of the budget to
+     solve the whole problem and prove it optimal (`t_u64div`, 649 values:
+     30 s; `t_u64div2`, 570: 14 s; bitfield.c: well under a second).
+  3. *Neighbourhoods.* Otherwise, each step frees a small set of values,
+     fixes every other one, and z3 solves that piece optimally as its own
+     small problem (fixed neighbours become excluded registers, preferences
+     to fixed values become one-register soft literals, call clobbers become
+     exact exclusions). Loops go first, innermost first, each freeing the
+     values of its own blocks (nested loops are already settled) and their
+     interference neighbours, so the moves that execute most are optimal
+     given their surroundings; then the values around the heaviest remaining
+     moves, until nothing improves or the budget is spent.
+
+  `-v` reports the stage reached, how many loops were settled optimally and
+  the remaining move cost per loop depth. On a SoftFloat-sized benchmark
+  (`compiler/tests/bench_alloc.c`,
+  1674 values, four outer loops around inlined 64-bit divisions, inner
+  correction loops) the weighted move cost goes from 1060 (greedy) to about
+  460 in 80 s, with every inner loop move removed; what remains is in the
+  large outer loop bodies.
 - **Out of SSA.** Critical edges are split; phis become parallel copies on
   the incoming edge, cycles are broken with three-xor swaps (no scratch
   register).
@@ -172,9 +190,10 @@ which the compiler emits itself) and `lui/auipc` is available as
 
 ## Not done yet
 
-- **Allocation at SoftFloat scale.** z3 stops proving optimality around
-  600-700 values. Splitting the problem (per function with callees fixed),
-  pre-coalescing safe copies, or symmetry breaking would let it go further.
+- **Allocation at SoftFloat scale.** Large loop bodies (hundreds of values in
+  one loop) are only improved piecewise. Splitting such a loop into
+  overlapping windows along its blocks, or pre-coalescing safe copies to
+  shrink it, would let the loop pass settle them too.
 - **Scratch memory.** Explicit hidden-memory storage (`scratch_base`) for
   state larger than the register file; no syntax for it yet.
 - **The SoftFloat milestone.** 80-bit extended precision for the 68040 FPU is

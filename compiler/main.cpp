@@ -94,7 +94,7 @@ static void checkCallGraph(Program *p) {
 int main(int argc, char **argv) {
   const char *outName = nullptr, *inName = nullptr;
   bool verbose = false, dumpTac = false;
-  unsigned rlimit = 30000000;   // z3 resource budget: deterministic, unlike a timeout
+  unsigned rlimit = 300000000;  // z3 resource budget: deterministic, unlike a timeout
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-o") && i + 1 < argc) outName = argv[++i];
     else if (!strcmp(argv[i], "-v")) verbose = true;
