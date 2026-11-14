@@ -77,6 +77,10 @@ uint64_t exc_counts[256];   // exceptions the model took, by vector
 std::vector<std::string> details;
 const size_t MAX_DETAILS = 4000;
 int details_per_op[65536];
+OpStats exc_stats[256];      // exceptions taken outside instructions, by vector
+int exc_details[256];
+bool exc_pending = false;
+int exc_vec;
 
 bool lookup(int kind, uint32_t addr, int n, uint32_t &out) {
   // assemble big-endian bytes from logged accesses of `kind`; later entries win
@@ -268,7 +272,9 @@ struct Machine {
     R[2] = (ext16_or_zero(2) << 16) | ext16_or_zero(4);
     R[3] = (ext16_or_zero(6) << 16) | ext16_or_zero(8);
     R[4] = gpc_insn + ilen;
-    uint32_t mpc = MC_BASE + entry;
+    run_from(MC_BASE + entry);
+  }
+  void run_from(uint32_t mpc) {
     const uint32_t n_words = sizeof MC_IMAGE / sizeof MC_IMAGE[0];
     while (!done && fail == R_MATCH) {
       uint32_t i = (mpc - MC_BASE) / 4;
@@ -367,13 +373,17 @@ int active_stack(uint16_t sr) {
   return (sr & 0x1000) ? UISA_CTL_MSP : UISA_CTL_ISP;
 }
 
-void note(int result, const Machine &m, const uisa_m68k_state &post, uint32_t model_pc) {
-  OpStats &s = stats[cur_op];
+// Count a result for the current instruction (vec < 0) or exception event
+// (vector vec), and keep a few details of each kind of failure.
+void note(int result, const Machine &m, const uisa_m68k_state &post, uint32_t model_pc, int vec = -1) {
+  OpStats &s = vec < 0 ? stats[cur_op] : exc_stats[vec & 0xff];
+  int &shown = vec < 0 ? details_per_op[cur_op] : exc_details[vec & 0xff];
   s.result[result]++;
-  if (result == R_MATCH || result == R_NATIVE || details.size() >= MAX_DETAILS || details_per_op[cur_op] >= 3) return;
-  details_per_op[cur_op]++;
+  if (result == R_MATCH || result == R_NATIVE || details.size() >= MAX_DETAILS || shown >= 3) return;
+  shown++;
   char b[640];
-  int n = snprintf(b, sizeof b, "%04x pc=%08x %s", cur_op, pre.pc, R_NAMES[result]);
+  int n = vec < 0 ? snprintf(b, sizeof b, "%04x pc=%08x %s", cur_op, pre.pc, R_NAMES[result])
+                  : snprintf(b, sizeof b, "exc%d pc=%08x %s", vec, pre.pc, R_NAMES[result]);
   if (!m.why.empty()) n += snprintf(b + n, sizeof b - n, " (%s)", m.why.c_str());
   if (result == R_MISMATCH_REG) {
     for (int i = 0; i < 16; i++)
@@ -395,6 +405,11 @@ void note(int result, const Machine &m, const uisa_m68k_state &post, uint32_t mo
   }
   details.push_back(b);
 }
+
+void setup(Machine &m);
+int compare(Machine &m, const uisa_m68k_state *post, uint32_t model_pc);
+int exc_level;
+uisa_fault exc_fault;
 
 }  // namespace
 
@@ -431,16 +446,7 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   if (kind != K_PLA && kind != K_SEQUENCER && kind != K_MILLICODE) return;
 
   Machine m;
-  memset(m.R, 0, sizeof m.R);
-  memset(m.csr, 0, sizeof m.csr);
-  for (int i = 0; i < 16; i++) m.R[G_D + i] = pre.r[i];
-  for (int i = 0; i < UISA_CTL_NUM; i++) m.csr[i] = pre.ctl[i];
-  m.R[G_PC] = pre.pc;
-  m.R[G_SR] = pre.sr & 0xff00;
-  m.X = (pre.sr >> 4) & 1; m.N = (pre.sr >> 3) & 1; m.Z = (pre.sr >> 2) & 1;
-  m.V = (pre.sr >> 1) & 1; m.C = pre.sr & 1;
-  m.gpc_insn = pre.pc;
-  m.gnpc_set = false;
+  setup(m);
   int ilen = FLOW_ILEN[cur_op];
   uint32_t model_pc;
   if (kind == K_PLA) {
@@ -457,7 +463,74 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   }
   if (m.fail != R_MATCH) { note(m.fail, m, *post, model_pc); return; }
   if (m.raised) exc_counts[m.vector & 0xff]++;
+  note(compare(m, post, model_pc), m, *post, model_pc);
+}
 
+uint64_t uisa_shadow_count(uint16_t opword, int result) { return stats[opword].result[result]; }
+uint64_t uisa_shadow_exc_count(int vector, int result) { return exc_stats[vector & 0xff].result[result]; }
+
+void uisa_shadow_exc_pre(int vector, int level, const uisa_m68k_state *s, const uisa_fault *f) {
+  if (pending) { stats[cur_op].result[R_ABORTED]++; pending = false; }
+  if (exc_pending) exc_stats[exc_vec & 0xff].result[R_ABORTED]++;
+  exc_pending = true;
+  exc_vec = vector;
+  exc_level = level;
+  if (f) exc_fault = *f; else memset(&exc_fault, 0, sizeof exc_fault);
+  pre = *s;
+  log_n = 0;
+  log_overflow = false;
+  uisa_shadow_logging = 1;
+}
+
+void uisa_shadow_exc_post(const uisa_m68k_state *post) {
+  uisa_shadow_logging = 0;
+  if (!exc_pending) return;
+  exc_pending = false;
+  exc_stats[exc_vec & 0xff].kind_count++;
+  if (log_overflow) return;
+  Machine m;
+  setup(m);
+  if (exc_vec == 2) {
+    m.csr[0x41] = exc_fault.addr;
+    m.csr[0x42] = exc_fault.ssw;
+    m.csr[0x43] = pre.pc;
+    m.csr[0x48] = exc_fault.ea;
+    m.csr[0x49] = exc_fault.wb2_status;
+    m.csr[0x4a] = exc_fault.wb2_addr;
+    m.csr[0x4b] = exc_fault.wb3_status;
+    m.csr[0x4c] = exc_fault.wb3_data;
+    for (int i = 0; i < 4; i++) m.csr[0x4d + i] = exc_fault.pd[i];
+    m.raise(2);
+    m.run_from(MC_BASE + MC_EP_EXCEPTION);
+  } else {
+    m.R[1] = exc_level;
+    m.R[2] = exc_vec;
+    m.run_from(MC_BASE + MC_EP_INTERRUPT);
+  }
+  mc_insns_total += m.mc_insns;
+  uint32_t model_pc = m.R[G_PC];
+  if (m.fail != R_MATCH) { note(m.fail, m, *post, model_pc, exc_vec); return; }
+  note(compare(m, post, model_pc), m, *post, model_pc, exc_vec);
+}
+
+}  // extern "C"
+
+namespace {
+
+void setup(Machine &m) {
+  memset(m.R, 0, sizeof m.R);
+  memset(m.csr, 0, sizeof m.csr);
+  for (int i = 0; i < 16; i++) m.R[G_D + i] = pre.r[i];
+  for (int i = 0; i < UISA_CTL_NUM; i++) m.csr[i] = pre.ctl[i];
+  m.R[G_PC] = pre.pc;
+  m.R[G_SR] = pre.sr & 0xff00;
+  m.X = (pre.sr >> 4) & 1; m.N = (pre.sr >> 3) & 1; m.Z = (pre.sr >> 2) & 1;
+  m.V = (pre.sr >> 1) & 1; m.C = pre.sr & 1;
+  m.gpc_insn = pre.pc;
+  m.gnpc_set = false;
+}
+
+int compare(Machine &m, const uisa_m68k_state *post, uint32_t model_pc) {
   int result = R_MATCH;
   for (int i = 0; i < 16 && result == R_MATCH; i++)
     if (m.R[G_D + i] != post->r[i]) result = R_MISMATCH_REG;
@@ -494,10 +567,12 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
       }
     }
   }
-  note(result, m, *post, model_pc);
+  return result;
 }
 
-uint64_t uisa_shadow_count(uint16_t opword, int result) { return stats[opword].result[result]; }
+}  // namespace
+
+extern "C" {
 
 void uisa_shadow_dump(void) {
   if (report_path.empty()) return;
@@ -518,6 +593,13 @@ void uisa_shadow_dump(void) {
     const OpStats &s = stats[op];
     if (!s.kind_count && !s.result[R_ABORTED]) continue;
     fprintf(f, "%04x %llu", op, (unsigned long long)s.kind_count);
+    for (int r = 0; r < R_NUM; r++) fprintf(f, " %llu", (unsigned long long)s.result[r]);
+    fprintf(f, "\n");
+  }
+  for (int v = 0; v < 256; v++) {
+    const OpStats &s = exc_stats[v];
+    if (!s.kind_count && !s.result[R_ABORTED]) continue;
+    fprintf(f, "# event %d %llu", v, (unsigned long long)s.kind_count);
     for (int r = 0; r < R_NUM; r++) fprintf(f, " %llu", (unsigned long long)s.result[r]);
     fprintf(f, "\n");
   }

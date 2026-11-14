@@ -6,6 +6,7 @@ base: 0x0
 # Labels for the spec's entry points (spec/uisa.yaml entry_points).
 entries:
   exception: exception
+  interrupt: interrupt
 handlers:
   "MOVE to/from SR, CCR, USP": move_sr
   "ORI/ANDI/EORI to CCR, SR": logic_sr

@@ -733,13 +733,22 @@ csrs:
   - {num: 0x21, name: fpsr,  desc: "Reserved for the FP extension."}
   - {num: 0x22, name: fpiar, desc: "Reserved for the FP extension."}
   - {num: 0x40, name: mstatus,      desc: "Micro-engine status: pending interrupt level, trace pending, locked-sequence active."}
-  - {num: 0x41, name: fault_addr,   desc: "Guest access fault: faulting address."}
-  - {num: 0x42, name: fault_status, desc: "Guest access fault: read/write, size, space and function code, cause."}
+  - {num: 0x41, name: fault_addr,   desc: "Guest access fault: faulting address (68040 frame FA and WB3A)."}
+  - {num: 0x42, name: fault_status, desc: "Guest access fault: 68040 special status word (SSW): read/write, size, transfer type and modifier, continuation bits."}
   - {num: 0x43, name: fault_pc,     desc: "Guest PC of the instruction that faulted."}
   - {num: 0x44, name: mcycle,       desc: "Cycle counter."}
   - {num: 0x45, name: ginstret,     desc: "Guest instructions retired."}
   - {num: 0x46, name: dispatch_base, desc: "Hidden-memory base of the opword dispatch table."}
   - {num: 0x47, name: scratch_base, desc: "Hidden-memory base of millicode scratch storage."}
+  - {num: 0x48, name: fault_ea,     desc: "Guest access fault: effective address of the faulting instruction (68040 frame EA)."}
+  - {num: 0x49, name: wb2_status,   desc: "Guest access fault: pending writeback 2 status (68040 frame WB2S)."}
+  - {num: 0x4a, name: wb2_addr,     desc: "Guest access fault: pending writeback 2 address (WB2A)."}
+  - {num: 0x4b, name: wb3_status,   desc: "Guest access fault: pending writeback 3 status (WB3S); WB3 is the faulting store."}
+  - {num: 0x4c, name: wb3_data,     desc: "Guest access fault: pending writeback 3 data (WB3D)."}
+  - {num: 0x4d, name: fault_pd0,    desc: "Guest access fault: MOVE16 line data 0 / writeback 1 data (PD0, WB1D)."}
+  - {num: 0x4e, name: fault_pd1,    desc: "Guest access fault: MOVE16 line data 1 (PD1)."}
+  - {num: 0x4f, name: fault_pd2,    desc: "Guest access fault: MOVE16 line data 2 (PD2)."}
+  - {num: 0x50, name: fault_pd3,    desc: "Guest access fault: MOVE16 line data 3 (PD3)."}
 
 # ---------------------------------------------------------------------------
 # Millicode entry points and the registers the hardware fills on entry.
@@ -750,10 +759,11 @@ entry_points:
     regs: {x1: "opword (zero-extended)", x2: "extension words 0:1 (word 0 in bits 31:16)", x3: "extension words 2:3", x4: "address of the next sequential guest instruction"}
   - name: exception
     desc: "Guest exception raised by a guest access fault, gfault, or a decode-time condition (illegal, privilege, line A/F)."
-    regs: {x1: "vector number", x2: "guest PC to stack (gpc when raised)", x3: "address of the instruction that raised it (format 2 frames); fault address for access errors", x4: "fault status (access errors)"}
+    regs: {x1: "vector number (2 for an access fault)", x2: "guest PC to stack (gpc when raised; the faulting instruction for access faults)", x3: "address of the instruction that raised it (format 2 frames)"}
+    note: "Access faults (vector 2) leave the 68040 frame fields in the fault_* and wb* CSRs."
   - name: interrupt
     desc: "Taken at a guest instruction boundary when the pending level exceeds the SR mask."
-    regs: {x1: "interrupt level"}
+    regs: {x1: "interrupt level", x2: "vector number (from the interrupt acknowledge; 24 + level when autovectored)"}
   - name: trace
     desc: "Taken after gexit when trace is pending."
     regs: {x1: "address of the traced instruction"}

@@ -183,6 +183,48 @@ int main() {
     t.pre.r[8] = 0x3000; t.pre.r[9] = 0x4000; t.post.r[8] = 0x3001; t.post.r[9] = 0x4001;
     run(t);
   }
+  {  // level 6 interrupt from user mode: autovector 30, format 0 frame on the ISP, mask = 6
+    uisa_m68k_state pre = st(0x1600, 0x0004), post = st(0x7000, 0x2600);
+    pre.r[15] = 0x4000; pre.ctl[UISA_CTL_ISP] = 0x8000; pre.ctl[UISA_CTL_VBR] = 0x1000;
+    post.r[15] = 0x7ff8; post.ctl[UISA_CTL_USP] = 0x4000; post.ctl[UISA_CTL_VBR] = 0x1000;
+    post.sr = 0x2604;
+    uisa_shadow_exc_pre(30, 6, &pre, nullptr);
+    uisa_shadow_log(UISA_LOG_READ, 0x1078, 4, 0x7000);
+    uisa_shadow_log(UISA_LOG_WRITE, 0x7ff8, 2, 0x0004);
+    uisa_shadow_log(UISA_LOG_WRITE, 0x7ffa, 4, 0x1600);
+    uisa_shadow_log(UISA_LOG_WRITE, 0x7ffe, 2, 0x0078);
+    uisa_shadow_exc_post(&post);
+    if (uisa_shadow_exc_count(30, 0) != 1) { printf("FAIL: level 6 interrupt\n"); fails++; }
+  }
+  {  // access fault (supervisor): format 7 frame from the fault fields
+    uisa_m68k_state pre = st(0x1700, 0x2708), post = st(0x7100, 0x2708);
+    pre.r[15] = 0x8000; pre.ctl[UISA_CTL_VBR] = 0x1000;
+    post.r[15] = 0x8000 - 60; post.ctl[UISA_CTL_VBR] = 0x1000;
+    uisa_fault f = {0x00c0ffee, 0x0105, 0x00c0ffec, 0, 0, 0x00a5, 0x12345678, {0, 0, 0, 0}};
+    uint32_t a = 0x8000 - 60;
+    uisa_shadow_exc_pre(2, 0, &pre, &f);
+    uisa_shadow_log(UISA_LOG_READ, 0x1008, 4, 0x7100);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 0, 2, 0x2708);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 2, 4, 0x1700);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 6, 2, 0x7008);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 8, 4, f.ea);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 12, 2, f.ssw);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 14, 2, f.wb3_status);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 16, 2, 0);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 18, 2, 0);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 20, 4, f.addr);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 24, 4, f.addr);
+    uisa_shadow_log(UISA_LOG_WRITE, a + 28, 4, f.wb3_data);
+    for (int o = 32; o < 60; o += 4) uisa_shadow_log(UISA_LOG_WRITE, a + o, 4, 0);
+    uisa_shadow_exc_post(&post);
+    if (uisa_shadow_exc_count(2, 0) != 1) {
+      printf("FAIL: access fault:");
+      for (int r = 0; r < 16; r++)
+        if (uisa_shadow_exc_count(2, r)) printf(" [%d]=%llu", r, (unsigned long long)uisa_shadow_exc_count(2, r));
+      printf("\n");
+      fails++;
+    }
+  }
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;

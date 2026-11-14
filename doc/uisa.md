@@ -744,13 +744,22 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | 0x21 | `fpsr` | Reserved for the FP extension. |
 | 0x22 | `fpiar` | Reserved for the FP extension. |
 | 0x40 | `mstatus` | Micro-engine status: pending interrupt level, trace pending, locked-sequence active. |
-| 0x41 | `fault_addr` | Guest access fault: faulting address. |
-| 0x42 | `fault_status` | Guest access fault: read/write, size, space and function code, cause. |
+| 0x41 | `fault_addr` | Guest access fault: faulting address (68040 frame FA and WB3A). |
+| 0x42 | `fault_status` | Guest access fault: 68040 special status word (SSW): read/write, size, transfer type and modifier, continuation bits. |
 | 0x43 | `fault_pc` | Guest PC of the instruction that faulted. |
 | 0x44 | `mcycle` | Cycle counter. |
 | 0x45 | `ginstret` | Guest instructions retired. |
 | 0x46 | `dispatch_base` | Hidden-memory base of the opword dispatch table. |
 | 0x47 | `scratch_base` | Hidden-memory base of millicode scratch storage. |
+| 0x48 | `fault_ea` | Guest access fault: effective address of the faulting instruction (68040 frame EA). |
+| 0x49 | `wb2_status` | Guest access fault: pending writeback 2 status (68040 frame WB2S). |
+| 0x4a | `wb2_addr` | Guest access fault: pending writeback 2 address (WB2A). |
+| 0x4b | `wb3_status` | Guest access fault: pending writeback 3 status (WB3S); WB3 is the faulting store. |
+| 0x4c | `wb3_data` | Guest access fault: pending writeback 3 data (WB3D). |
+| 0x4d | `fault_pd0` | Guest access fault: MOVE16 line data 0 / writeback 1 data (PD0, WB1D). |
+| 0x4e | `fault_pd1` | Guest access fault: MOVE16 line data 1 (PD1). |
+| 0x4f | `fault_pd2` | Guest access fault: MOVE16 line data 2 (PD2). |
+| 0x50 | `fault_pd3` | Guest access fault: MOVE16 line data 3 (PD3). |
 
 ## Millicode entry points
 
@@ -763,14 +772,16 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 
 **exception**: Guest exception raised by a guest access fault, gfault, or a decode-time condition (illegal, privilege, line A/F).
 
-- `x1`: vector number
-- `x2`: guest PC to stack (gpc when raised)
-- `x3`: address of the instruction that raised it (format 2 frames); fault address for access errors
-- `x4`: fault status (access errors)
+- `x1`: vector number (2 for an access fault)
+- `x2`: guest PC to stack (gpc when raised; the faulting instruction for access faults)
+- `x3`: address of the instruction that raised it (format 2 frames)
+
+Access faults (vector 2) leave the 68040 frame fields in the fault_* and wb* CSRs.
 
 **interrupt**: Taken at a guest instruction boundary when the pending level exceeds the SR mask.
 
 - `x1`: interrupt level
+- `x2`: vector number (from the interrupt acknowledge; 24 + level when autovectored)
 
 **trace**: Taken after gexit when trace is pending.
 

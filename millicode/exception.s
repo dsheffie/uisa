@@ -8,27 +8,17 @@
 ;   x2 = PC to stack (gpc when the exception was raised: the instruction's own
 ;        address for faults, the next instruction for traps)
 ;   x3 = address of the instruction that raised it (the format 2 address)
-;   x4 = fault status (access errors; not used yet)
+;   Access faults (vector 2) take the format 7 frame fields from the fault_*
+;   and wb* CSRs.
 ; The call stack is empty on entry.
 
 exception:
-        rdccr   x10
-        or      x10, x10, gsr           ; SR to stack
-        andi    x5, gsr, 0x1000         ; M = 1 (master stack): not handled yet
-        b.eq    x5, x0, exc_m0
-        brk     7
-exc_m0:
-        andi    x5, gsr, 0x2000
-        b.ne    x5, x0, exc_super
-        csrw    usp, a7                 ; user -> supervisor stack
-        csrr    a7, isp
-exc_super:
+        call    exc_enter
         andi    x5, gsr, 0x0700         ; keep the interrupt mask; T1 = T0 = 0
         ori     gsr, x5, 0x2000         ; S = 1
-        csrr    x12, vbr
-        sh2add  x12, x12, x1
-        ld.32.gd x13, 0(x12)            ; handler address
-        slli    x14, x1, 2              ; vector offset
+        call    exc_vector
+        addi    x5, x0, 2
+        b.eq    x1, x5, exc_fmt7        ; access fault
         addi    x5, x0, 5               ; zero divide, CHK, TRAPV/TRAPcc, trace:
         b.eq    x1, x5, exc_fmt2        ;   six-word frame with the instruction address
         addi    x5, x0, 6
@@ -43,12 +33,80 @@ exc_fmt2:
         addi    a7, a7, -12
         st.32.gd x3, 8(a7)
         ori     x14, x14, 0x2000        ; format 2
+        jal     x0, exc_frame
+; Format 7 (access error), 30 words, from the fault CSRs.
+exc_fmt7:
+        addi    a7, a7, -60
+        csrr    x5, fault_ea
+        st.32.gd x5, 8(a7)              ; EA
+        csrr    x5, fault_status
+        st.16.gd x5, 12(a7)             ; SSW
+        csrr    x5, wb3_status
+        st.16.gd x5, 14(a7)             ; WB3S
+        csrr    x5, wb2_status
+        st.16.gd x5, 16(a7)             ; WB2S
+        st.16.gd x0, 18(a7)             ; WB1S
+        csrr    x5, fault_addr
+        st.32.gd x5, 20(a7)             ; FA
+        st.32.gd x5, 24(a7)             ; WB3A
+        csrr    x5, wb3_data
+        st.32.gd x5, 28(a7)             ; WB3D
+        csrr    x5, wb2_addr
+        st.32.gd x5, 32(a7)             ; WB2A
+        st.32.gd x0, 36(a7)             ; WB2D
+        st.32.gd x0, 40(a7)             ; WB1A
+        csrr    x5, fault_pd0
+        st.32.gd x5, 44(a7)             ; WB1D / PD0
+        csrr    x5, fault_pd1
+        st.32.gd x5, 48(a7)
+        csrr    x5, fault_pd2
+        st.32.gd x5, 52(a7)
+        csrr    x5, fault_pd3
+        st.32.gd x5, 56(a7)
+        addi    x5, x0, 7               ; format 7
+        slli    x5, x5, 12
+        or      x14, x14, x5
 exc_frame:
         st.16.gd x10, 0(a7)
         st.32.gd x2, 2(a7)
         st.16.gd x14, 6(a7)
         add     gpc, x13, x0
         gexit
+
+; Interrupt entry (spec entry point `interrupt`), taken at an instruction
+; boundary: x1 = level, x2 = vector. Format 0 frame with the next PC.
+interrupt:
+        call    exc_enter
+        slli    x5, x1, 8
+        ori     gsr, x5, 0x2000         ; S = 1, T = 0, mask = level
+        add     x1, x2, x0
+        add     x2, gpc, x0
+        call    exc_vector
+        addi    a7, a7, -8
+        jal     x0, exc_frame
+
+; x10 = SR to stack; switch to the supervisor stack.
+exc_enter:
+        rdccr   x10
+        or      x10, x10, gsr
+        andi    x5, gsr, 0x1000         ; M = 1 (master stack): not handled yet
+        b.eq    x5, x0, exc_m0
+        brk     7
+exc_m0:
+        andi    x5, gsr, 0x2000
+        b.ne    x5, x0, exc_enter_done
+        csrw    usp, a7                 ; user -> supervisor stack
+        csrr    a7, isp
+exc_enter_done:
+        ret
+
+; x13 = handler address for vector x1; x14 = vector offset
+exc_vector:
+        csrr    x12, vbr
+        sh2add  x12, x12, x1
+        ld.32.gd x13, 0(x12)
+        slli    x14, x1, 2
+        ret
 
 ; ---------------------------------------------------------------------------
 ; TRAP #n, TRAPV, TRAPcc, ILLEGAL, line A
