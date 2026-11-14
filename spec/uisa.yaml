@@ -91,11 +91,14 @@ formats:
   L:   {fields: [[op,31,26],[imm,25,0]], imm: {signed: true, scale: 4}}
   B:   {fields: [[op,31,26],[rs1,25,20],[rs2,19,14],[cond,13,11],[imm,10,0]], imm: {signed: true, scale: 4}}
   C:   {fields: [[op,31,26],[cond,25,22],[imm,21,0]], imm: {signed: true, scale: 4}}
-  G:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[fn,7,3],[sz,2,1],[f,0,0]]}
-  GI:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,9],[sz,8,7],[f,6,6],[imm,5,0]], imm: {signed: false, scale: 1}}
+  G:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[fn,7,2],[sz,1,0]]}
+  GI:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,8],[sz,7,6],[imm,5,0]], imm: {signed: false, scale: 1}}
   M:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[sp,13,12],[imm,11,0]], imm: {signed: true, scale: 1}}
   S:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,8],[imm,7,0]], imm: {signed: false, scale: 1}}
   BFI: {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,12],[f,11,11],["off",10,6],[wid,5,1],[rsv,0,0]]}
+  # guest control flow: displacements are bytes, relative to the guest instruction's address
+  CG:  {fields: [[op,31,26],[cond,25,22],[imm,21,0]], imm: {signed: true, scale: 1}}
+  BG:  {fields: [[op,31,26],[rs1,25,20],[cond,19,19],[imm,18,0]], imm: {signed: true, scale: 1}}
 
 # Major opcodes (bits 31:26). Unlisted values are reserved; 48..55 are held
 # for a future FP extension.
@@ -141,6 +144,13 @@ majors:
   SYS: 38
   BF: 39
   BFI: 40
+  GBCC: 41
+  GBZ: 42
+  GPCADDI: 43
+  GOPN: 44        # the .nf (no flags) twins of GOP, GOPZ, GOPI, GOPIZ
+  GOPZN: 45
+  GOPIN: 46
+  GOPIZN: 47
 
 # ---------------------------------------------------------------------------
 # Base operations: a conventional clean RISC. No flags, full 32-bit results.
@@ -189,6 +199,9 @@ base_ops:
   - {name: wrccr,  major: ALU, fn: 38, fmt: R, asm: [rs1], unit: alu, writes_flags: [nzvc, x], sem: "CCR_UNPACK(a, X, N, Z, V, C);", desc: "Load the renamed flags from a register (CCR layout)."}
   - {name: rdg,    major: ALU, fn: 39, fmt: R, asm: [rd, rs1], unit: alu, serialize: true, sem: "r = GREG_READ(a & 31);", desc: "Read guest register g[rs1 & 31] (namespace index 32 + n). Index is data, so rename serializes."}
   - {name: wrg,    major: ALU, fn: 40, fmt: R, asm: [rs1, rs2], unit: alu, serialize: true, sem: "GREG_WRITE(a & 31, b);", desc: "Write rs2 to guest register g[rs1 & 31]. Serializes."}
+  - {name: sh1add, major: ALU, fn: 42, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 1);", desc: "Scaled-index add (68k (d8,An,Xn*2))."}
+  - {name: sh2add, major: ALU, fn: 43, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 2);"}
+  - {name: sh3add, major: ALU, fn: 44, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 3);"}
   - {name: bfmask, major: ALU, fn: 41, fmt: R, asm: [rd, rs2], unit: alu, sem: "r = BF_MASK(b);", desc: "Mask of the 68k bitfield described by rs2 (offset in bits 4:0 from the MSB, width in bits 9:5, 0 means 32), wrapping like a register bitfield."}
 
   # --- guest-condition select / set (read NZVC) ---
@@ -228,6 +241,15 @@ base_ops:
   - {name: gexit,   major: SYS, fn: 0,  fmt: S, asm: [], unit: sys, cti: gexit, desc: "End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc."}
   - {name: gfault,  major: SYS, fn: 1,  fmt: S, asm: [imm], unit: sys, cti: gfault, desc: "Raise guest exception vector imm8. Transfers to the exception entry point."}
   - {name: gfaultr, major: SYS, fn: 16, fmt: S, asm: [rs1], unit: sys, cti: gfault, desc: "Raise the guest exception whose vector is in rs1 (TRAP #n, computed vectors)."}
+
+  # --- guest control flow. These set the guest next-PC; the change takes effect
+  # when the guest instruction ends (end of a PLA flow, or gexit), so the rest of
+  # the flow still executes. GPC_INSN is the current guest instruction's address.
+  - {family: gbcc, major: GBCC, per_cond: guest, fmt: CG, asm: [imm], unit: br, cti: gbranch, reads_flags: [nzvc], sem: "if (COND) GNPC_SET(GPC_INSN + b);", desc: "Guest conditional branch (Bcc, BRA via gbcc.t)."}
+  - {name: gbz,     major: GBZ, cond: 0, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a == 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is zero."}
+  - {name: gbnz,    major: GBZ, cond: 1, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a != 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is nonzero (DBF)."}
+  - {name: gjr,     major: SYS, fn: 17, fmt: S, asm: [rs1], unit: br, cti: gjump, sem: "GNPC_SET(a);", desc: "Guest jump to the address in rs1 (JMP, JSR, RTS)."}
+  - {name: gpcaddi, major: GPCADDI, fmt: I, asm: [rd, imm], imm_signed: true, unit: alu, sem: "r = GPC_INSN + b;", desc: "rd = guest instruction address + imm (return addresses, PC-relative operands)."}
   - {name: ret,     major: SYS, fn: 2,  fmt: S, asm: [], unit: br, cti: ret, sem: "npc = CSTACK_POP();", desc: "Return through the hardware millicode return stack. Underflow is a millicode fault."}
   - {name: csrr,    major: SYS, fn: 3,  fmt: S, asm: [rd, csr], unit: sys, sem: "r = CSR_READ(IMM);"}
   - {name: csrw,    major: SYS, fn: 4,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, a);"}
@@ -279,8 +301,9 @@ mem_ops:
 #                         No dependence on the old rd.
 #   <name>i.<sz>[z]       immediate forms (majors GOPI/GOPIZ), imm6 unsigned,
 #                         for families with imm: true.
-#   Every form has a `.nf` variant (f=0) that writes no flags, for dead-flag
-#   elimination. The flags written when f=1 are fixed by the family.
+#   Every form has a `.nf` variant (majors GOPN/GOPZN/GOPIN/GOPIZN) that
+#   writes no flags, for dead-flag elimination. The flags written otherwise
+#   are fixed by the family.
 #
 # kind:
 #   binary   r = op(a, b)          (a = rs1, b = rs2/imm)
@@ -401,6 +424,7 @@ guest_ops:
   - name: mov
     fn: 11
     kind: unary
+    imm: true
     writes: [N, Z, V, C]
     sem: "r = b & m; N = MSB(r, n); Z = (r == 0); V = 0; C = 0;"
     desc: "MOVE / TST. mov.8z x0, rs gives TST.B."
@@ -621,6 +645,43 @@ guest_ops:
     writes: [N, Z, V, C]
     sem: "r = (uint32_t)SX(b, 8); N = MSB(r, 32); Z = (r == 0); V = 0; C = 0;"
     desc: "EXTB.L (byte to long)."
+
+  - name: btst
+    fn: 29
+    kind: compare
+    sizes: [8, 32]
+    imm: true
+    reads: [N, V, C]
+    writes: [N, Z, V, C]
+    sem: "Z = !((a >> (b & (n - 1))) & 1); N = nin; V = vin; C = cin;"
+    desc: "Bit test: only Z changes, so NZVC is read and merged. .8 for memory operands (bit mod 8), .32 for Dn (bit mod 32)."
+
+  - name: bchg
+    fn: 30
+    kind: binary
+    sizes: [8, 32]
+    imm: true
+    reads: [N, V, C]
+    writes: [N, Z, V, C]
+    sem: "unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a ^ (1u << k)) & m; N = nin; V = vin; C = cin;"
+
+  - name: bclr
+    fn: 31
+    kind: binary
+    sizes: [8, 32]
+    imm: true
+    reads: [N, V, C]
+    writes: [N, Z, V, C]
+    sem: "unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a & ~(1u << k)) & m; N = nin; V = vin; C = cin;"
+
+  - name: bset
+    fn: 32
+    kind: binary
+    sizes: [8, 32]
+    imm: true
+    reads: [N, V, C]
+    writes: [N, Z, V, C]
+    sem: "unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a | (1u << k)) & m; N = nin; V = vin; C = cin;"
 
 # ---------------------------------------------------------------------------
 # Control and status registers (S-format imm8). Writes serialize.

@@ -155,6 +155,8 @@ class Spec:
             fixed = {"op": self.majors[op["major"]]}
             if "fn" in op:
                 fixed["fn"] = op["fn"]
+            if "cond" in op:
+                fixed["cond"] = op["cond"]
             if "rsv" in fmt.fields:
                 fixed["rsv"] = 0
             self._add(Variant(op["name"], fmt, fixed, op["asm"], **common))
@@ -222,8 +224,8 @@ class Spec:
                 for f in (1, 0):
                     if f == 0 and form == "compare":
                         continue            # a compare without flags does nothing
-                    fixed = {"op": self.majors[major], "fn": op["fn"],
-                             "sz": self.size_code[n], "f": f}
+                    fixed = {"op": self.majors[major if f else major + "N"],
+                             "fn": op["fn"], "sz": self.size_code[n]}
                     mnem = "%s.%s%s" % (base, suf, "" if f else ".nf")
                     attrs = dict(kind="guest", unit=op.get("unit", "mul" if op["name"].startswith("mul") else
                                                      "div" if op["name"].startswith("div") else "alu"),

@@ -159,7 +159,7 @@ GitHub; commit it together with the spec change that produced it.
 
 # Reference (generated)
 
-Spec version **0.1-draft**. 560 concrete instruction variants.
+Spec version **0.1-draft**. 633 concrete instruction variants.
 
 ## Parameters
 
@@ -201,11 +201,13 @@ Two renamed flag resources: `nzvc` (N Z V C), `x` (X).
 | L | `op[31:26]` `imm[25:0]` | signed, x4 |
 | B | `op[31:26]` `rs1[25:20]` `rs2[19:14]` `cond[13:11]` `imm[10:0]` | signed, x4 |
 | C | `op[31:26]` `cond[25:22]` `imm[21:0]` | signed, x4 |
-| G | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `fn[7:3]` `sz[2:1]` `f[0:0]` |  |
-| GI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:9]` `sz[8:7]` `f[6:6]` `imm[5:0]` | unsigned |
+| G | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `fn[7:2]` `sz[1:0]` |  |
+| GI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `sz[7:6]` `imm[5:0]` | unsigned |
 | M | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `imm[11:0]` | signed |
 | S | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `imm[7:0]` | unsigned |
 | BFI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:12]` `f[11:11]` `off[10:6]` `wid[5:1]` `rsv[0:0]` |  |
+| CG | `op[31:26]` `cond[25:22]` `imm[21:0]` | signed |
+| BG | `op[31:26]` `rs1[25:20]` `cond[19:19]` `imm[18:0]` | signed |
 
 Base ops can override immediate signedness (e.g. logical immediates are zero-extended).
 
@@ -218,7 +220,7 @@ Base ops can override immediate signedness (e.g. logical immediates are zero-ext
 | **16** | BR | BCC | GOP | GOPZ | GOPI | GOPIZ | LD8U | LD8S |
 | **24** | LD16U | LD16S | LD32 | ST8 | ST16 | ST32 | LDL8 | LDL16 |
 | **32** | LDL32 | STU8 | STU16 | STU32 | PROBER | PROBEW | SYS | BF |
-| **40** | BFI | - | - | - | - | - | - | - |
+| **40** | BFI | GBCC | GBZ | GPCADDI | GOPN | GOPZN | GOPIN | GOPIZN |
 | **48** | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* |
 | **56** | - | - | - | - | - | - | - | - |
 
@@ -269,6 +271,9 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `wrccr` | R | ALU fn=38 | rs1 | `CCR_UNPACK(a, X, N, Z, V, C);` | Load the renamed flags from a register (CCR layout). (writes nzvc+x) |
 | `rdg` | R | ALU fn=39 | rd, rs1 | `r = GREG_READ(a & 31);` | Read guest register g[rs1 & 31] (namespace index 32 + n). Index is data, so rename serializes. (serializes) |
 | `wrg` | R | ALU fn=40 | rs1, rs2 | `GREG_WRITE(a & 31, b);` | Write rs2 to guest register g[rs1 & 31]. Serializes. (serializes) |
+| `sh1add` | R | ALU fn=42 | rd, rs1, rs2 | `r = a + (b << 1);` | Scaled-index add (68k (d8,An,Xn*2)). |
+| `sh2add` | R | ALU fn=43 | rd, rs1, rs2 | `r = a + (b << 2);` |  |
+| `sh3add` | R | ALU fn=44 | rd, rs1, rs2 | `r = a + (b << 3);` |  |
 | `bfmask` | R | ALU fn=41 | rd, rs2 | `r = BF_MASK(b);` | Mask of the 68k bitfield described by rs2 (offset in bits 4:0 from the MSB, width in bits 9:5, 0 means 32), wrapping like a register bitfield. |
 | `sel.<cc>` | R | ALU fn=0x40+cc | rd, rs1, rs2 | `r = COND ? a : b;` | rd = cond ? rs1 : rs2, on the guest condition. cc: t f hi ls cc cs ne eq vc vs pl mi ge lt gt le. (reads nzvc) |
 | `s.<cc>` | R | ALU fn=0x50+cc | rd | `r = COND ? 0xffffffffu : 0;` | rd = cond ? all ones : 0 (Scc building block; follow with mov.8 to merge). cc: t f hi ls cc cs ne eq vc vs pl mi ge lt gt le. (reads nzvc) |
@@ -298,6 +303,11 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `gexit` | S | SYS fn=0 |  |  | End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc. |
 | `gfault` | S | SYS fn=1 | imm |  | Raise guest exception vector imm8. Transfers to the exception entry point. |
 | `gfaultr` | S | SYS fn=16 | rs1 |  | Raise the guest exception whose vector is in rs1 (TRAP #n, computed vectors). |
+| `gbcc.<cc>` | CG | GBCC cond=cc | imm | `if (COND) GNPC_SET(GPC_INSN + b);` | Guest conditional branch (Bcc, BRA via gbcc.t). cc: t f hi ls cc cs ne eq vc vs pl mi ge lt gt le. (reads nzvc) |
+| `gbz` | BG | GBZ | rs1, imm | `if (a == 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is zero. |
+| `gbnz` | BG | GBZ | rs1, imm | `if (a != 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is nonzero (DBF). |
+| `gjr` | S | SYS fn=17 | rs1 | `GNPC_SET(a);` | Guest jump to the address in rs1 (JMP, JSR, RTS). |
+| `gpcaddi` | I | GPCADDI | rd, imm | `r = GPC_INSN + b;` | rd = guest instruction address + imm (return addresses, PC-relative operands). |
 | `ret` | S | SYS fn=2 |  | `npc = CSTACK_POP();` | Return through the hardware millicode return stack. Underflow is a millicode fault. |
 | `csrr` | S | SYS fn=3 | rd, csr | `r = CSR_READ(IMM);` |  |
 | `csrw` | S | SYS fn=4 | csr, rs1 | `CSR_WRITE(IMM, a);` | (serializes) |
@@ -330,7 +340,7 @@ Each family expands into sized forms (see *Sized operations* above). `<f>.8`/`<f
 | `or` | 8 | binary | 8,16,32 | yes | - | N Z V C |  |
 | `eor` | 9 | binary | 8,16,32 | yes | - | N Z V C |  |
 | `not` | 10 | unary | 8,16,32 |  | - | N Z V C |  |
-| `mov` | 11 | unary | 8,16,32 |  | - | N Z V C | MOVE / TST. mov.8z x0, rs gives TST.B. |
+| `mov` | 11 | unary | 8,16,32 | yes | - | N Z V C | MOVE / TST. mov.8z x0, rs gives TST.B. |
 | `lsl` | 12 | binary | 8,16,32 | yes | X | N Z V C X | Count is rs2 mod 64. A zero count clears C and leaves X; X is therefore always read. |
 | `lsr` | 13 | binary | 8,16,32 | yes | X | N Z V C X |  |
 | `asl` | 14 | binary | 8,16,32 | yes | X | N Z V C X | V is set if the most significant bit changes at any time during the shift. |
@@ -348,6 +358,10 @@ Each family expands into sized forms (see *Sized operations* above). `<f>.8`/`<f
 | `divs` | 26 | tiedfull | 16,32 |  | - | N Z V C | Precondition: divisor != 0 |
 | `ext` | 27 | unary | 16,32 |  | - | N Z V C | .16: EXT.W (byte to word, merged). .32: EXT.L (word to long). |
 | `extb` | 28 | unary | 32 |  | - | N Z V C | EXTB.L (byte to long). |
+| `btst` | 29 | compare | 8,32 | yes | N V C | N Z V C | Bit test: only Z changes, so NZVC is read and merged. .8 for memory operands (bit mod 8), .32 for Dn (bit mod 32). |
+| `bchg` | 30 | binary | 8,32 | yes | N V C | N Z V C |  |
+| `bclr` | 31 | binary | 8,32 | yes | N V C | N Z V C |  |
+| `bset` | 32 | binary | 8,32 | yes | N V C | N Z V C |  |
 
 ### Guest-op semantics
 
@@ -610,6 +624,30 @@ r = (uint32_t)SX(b, n / 2) & m; N = MSB(r, n); Z = (r == 0); V = 0; C = 0;
 
 ```c
 r = (uint32_t)SX(b, 8); N = MSB(r, 32); Z = (r == 0); V = 0; C = 0;
+```
+
+**`btst`**
+
+```c
+Z = !((a >> (b & (n - 1))) & 1); N = nin; V = vin; C = cin;
+```
+
+**`bchg`**
+
+```c
+unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a ^ (1u << k)) & m; N = nin; V = vin; C = cin;
+```
+
+**`bclr`**
+
+```c
+unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a & ~(1u << k)) & m; N = nin; V = vin; C = cin;
+```
+
+**`bset`**
+
+```c
+unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a | (1u << k)) & m; N = nin; V = vin; C = cin;
 ```
 
 ## Conditions
