@@ -1,7 +1,7 @@
 # Which millicode routine handles each 68k operation that spec/flows.yaml
 # sends to millicode (keys are flows.yaml's millicode op names).
 # Operations without an entry still run natively in the shadow model.
-sources: [system.s, ea.s, integer.s, exception.s]
+sources: [system.s, ea.s, integer.s, exception.s, bfwrite.s, divide.s]
 base: 0x0
 # Labels for the spec's entry points (spec/uisa.yaml entry_points).
 entries:
@@ -25,3 +25,10 @@ handlers:
   ILLEGAL: illegal_insn
   LINE-A: line_a
   RTE: rte
+  BFCHG: bfwrite
+  BFCLR: bfwrite
+  BFSET: bfwrite
+  BFINS: bfwrite
+  DIVU: divw
+  DIVS: divw
+  DIVx: divl

@@ -367,7 +367,7 @@ Each family expands into sized forms (see *Sized operations* above). `<f>.8`/`<f
 | `nbcd` | 22 | unary | 8 |  | X Z | N Z V C X |  |
 | `mulu` | 23 | full | 16,32 |  | - | N Z V C | .16: 16x16->32 (MULU.W). .32: low 32 bits, V on overflow (MULU.L 32-bit result). High half: base mulhu. |
 | `muls` | 24 | full | 16,32 |  | - | N Z V C |  |
-| `divu` | 25 | tiedfull | 16,32 |  | - | N Z V C | .16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd is unchanged and V is set. .32: quotient only; remainder via base remu. Precondition: divisor != 0 (millicode checks and raises the zero-divide exception first) |
+| `divu` | 25 | tiedfull | 16,32 |  | - | N Z V C | .16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd, N and Z are unchanged, V is set and C cleared (as the 68040 does). .32: quotient only; remainder via base remu. Precondition: divisor != 0 (millicode checks and raises the zero-divide exception first) |
 | `divs` | 26 | tiedfull | 16,32 |  | - | N Z V C | Precondition: divisor != 0 |
 | `ext` | 27 | unary | 16,32 |  | - | N Z V C | .16: EXT.W (byte to word, merged). .32: EXT.L (word to long). |
 | `extb` | 28 | unary | 32 |  | - | N Z V C | EXTB.L (byte to long). |
@@ -609,7 +609,7 @@ N = MSB(r, 32); Z = (r == 0); C = 0;
 ```c
 if (n == 16) {
   uint32_t d = b & 0xffff, q = a / d, rm = a % d;
-  if (q > 0xffff) { r = a; V = 1; N = 0; Z = 0; }
+  if (q > 0xffff) { r = a; V = 1; }
   else { r = (rm << 16) | q; V = 0; N = MSB(q, 16); Z = (q == 0); }
 } else { r = a / b; V = 0; N = MSB(r, 32); Z = (r == 0); }
 C = 0;
@@ -620,9 +620,9 @@ C = 0;
 ```c
 if (n == 16) {
   int64_t d = SX(b, 16), q = (int64_t)(int32_t)a / d, rm = (int64_t)(int32_t)a % d;
-  if (q > 32767 || q < -32768) { r = a; V = 1; N = 0; Z = 0; }
+  if (q > 32767 || q < -32768) { r = a; V = 1; }
   else { r = (((uint32_t)rm & 0xffff) << 16) | ((uint32_t)q & 0xffff); V = 0; N = MSB((uint32_t)q, 16); Z = (q == 0); }
-} else if (a == 0x80000000u && b == 0xffffffffu) { r = a; V = 1; N = 0; Z = 0; }
+} else if (a == 0x80000000u && b == 0xffffffffu) { r = a; V = 1; }
 else { r = (uint32_t)((int32_t)a / (int32_t)b); V = 0; N = MSB(r, 32); Z = (r == 0); }
 C = 0;
 ```

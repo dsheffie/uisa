@@ -36,6 +36,211 @@ static void run(Insn &t) {
   }
 }
 
+// ---- randomized checks against C references of Previous's 68040 semantics ----
+static uint32_t rng_state = 12345;
+static uint32_t rnd() { rng_state ^= rng_state << 13; rng_state ^= rng_state >> 17; rng_state ^= rng_state << 5; return rng_state; }
+static uint32_t rnd_val() {   // bias towards small, large and boundary values
+  switch (rnd() % 6) {
+  case 0: return rnd() % 16;
+  case 1: return 0u - (rnd() % 16);
+  case 2: return 0x80000000u + (rnd() % 4) - 2;
+  case 3: return rnd() >> (rnd() % 32);
+  default: return rnd();
+  }
+}
+
+static int ref_fail(const char *what, uint16_t op, uint16_t ext, int r) {
+  printf("FAIL: %s opword %04x ext %04x result %d\n", what, op, ext, r);
+  return 1;
+}
+
+// DIVU.L/DIVS.L D<s>,... (Previous m68k_divl, 68040 flags). Returns false on
+// a zero divisor (not checked here).
+static bool ref_divl(uisa_m68k_state &st, uint32_t src, uint16_t extra) {
+  int dq = (extra >> 12) & 7, dr = extra & 7;
+  uint16_t ccr = st.sr & 0x1f;
+  if (src == 0) return false;
+  bool ovf = false;
+  uint32_t q32 = 0, r32 = 0;
+  if (extra & 0x800) {
+    int64_t a = (int32_t)st.r[dq];
+    if (extra & 0x400) { a &= 0xffffffffll; a |= (int64_t)((uint64_t)st.r[dr] << 32); }
+    if ((uint64_t)a == 0x8000000000000000ull && src == ~0u) ovf = true;
+    else {
+      int64_t rem = a % (int64_t)(int32_t)src, quot = a / (int64_t)(int32_t)src;
+      if ((quot & (int64_t)0xffffffff80000000ll) != 0 && (quot & (int64_t)0xffffffff80000000ll) != (int64_t)0xffffffff80000000ll) ovf = true;
+      else { q32 = (uint32_t)quot; r32 = (uint32_t)rem; }
+    }
+  } else {
+    uint64_t a = st.r[dq];
+    if (extra & 0x400) a |= (uint64_t)st.r[dr] << 32;
+    uint64_t rem = a % src, quot = a / src;
+    if (quot > 0xffffffffu) ovf = true;
+    else { q32 = (uint32_t)quot; r32 = (uint32_t)rem; }
+  }
+  if (ovf) ccr = (ccr & ~1) | 2;
+  else {
+    ccr &= 0x10;
+    if (q32 == 0) ccr |= 4;
+    if ((int32_t)q32 < 0) ccr |= 8;
+    st.r[dr] = r32;
+    st.r[dq] = q32;
+  }
+  st.sr = (st.sr & 0xff00) | ccr;
+  return true;
+}
+
+// 40-bit big-endian view of up to 5 bytes for memory bit fields
+static uint32_t ref_bf_insert_flags(uint32_t field, int width, uint16_t &ccr) {
+  ccr &= 0x10;
+  if (field == 0) ccr |= 4;
+  if (field & (1u << (width - 1))) ccr |= 8;
+  return field;
+}
+static uint32_t ref_bf_new(int kind, uint32_t old, uint32_t ins, int width) {
+  uint32_t m = 0xffffffffu >> (32 - width);
+  switch (kind) {
+  case 2: return old ^ m;
+  case 4: return 0;
+  case 6: return m;
+  default: return ins & m;
+  }
+}
+
+static int random_divl(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    uint16_t ext = (uint16_t)(((rnd() % 8) << 12) | (rnd() % 2 ? 0x800 : 0) | (rnd() % 2 ? 0x400 : 0));
+    ext |= rnd() % 8;
+    if (!(ext & 0x400)) ext = (ext & ~7) | ((ext >> 12) & 7);   // 32-bit form: Dr = Dq
+    int sreg = rnd() % 8;
+    uint16_t op = 0x4c40 | sreg;
+    uisa_m68k_state pre = st(0x2000, 0x2700 | (rnd() & 0x1f));
+    for (int r = 0; r < 8; r++) pre.r[r] = rnd_val();
+    pre.r[15] = 0x8000;
+    if (pre.r[sreg] == 0) pre.r[sreg] = 7;
+    uisa_m68k_state post = pre;
+    ref_divl(post, pre.r[sreg], ext);
+    post.pc = 0x2004;
+    uint64_t before = uisa_shadow_count(op, 0);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2002, 2, ext);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random divl", op, ext, 0);
+  }
+  return bad;
+}
+
+static int random_divw(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    bool sgn = rnd() % 2;
+    int sreg = rnd() % 8, dreg = rnd() % 8;
+    uint16_t op = (uint16_t)(0x80c0 | (sgn ? 0x100 : 0) | (dreg << 9) | sreg);
+    uisa_m68k_state pre = st(0x2200, 0x2700 | (rnd() & 0x1f));
+    for (int r = 0; r < 8; r++) pre.r[r] = rnd_val();
+    pre.r[15] = 0x8000;
+    if ((pre.r[sreg] & 0xffff) == 0) pre.r[sreg] |= 3;
+    uisa_m68k_state post = pre;
+    uint32_t dst = pre.r[dreg];
+    uint16_t src = pre.r[sreg] & 0xffff, ccr = pre.sr & 0x1f;
+    bool ovf;
+    uint32_t newv = 0;
+    if (!sgn) {
+      uint32_t q = dst / src, rm = dst % src;
+      ovf = q > 0xffff;
+      newv = (q & 0xffff) | (rm << 16);
+    } else if (dst == 0x80000000u && (int16_t)src == -1) {
+      ovf = true;
+    } else {
+      int32_t q = (int32_t)dst / (int16_t)src;
+      uint16_t rm = (uint16_t)((int32_t)dst % (int16_t)src);
+      ovf = (q & 0xffff8000) != 0 && (q & 0xffff8000) != (int32_t)0xffff8000;
+      newv = ((uint32_t)q & 0xffff) | ((uint32_t)rm << 16);
+    }
+    if (ovf) ccr = (ccr & ~1) | 2;
+    else {
+      ccr &= 0x10;
+      if ((newv & 0xffff) == 0) ccr |= 4;
+      if (newv & 0x8000) ccr |= 8;
+      post.r[dreg] = newv;
+    }
+    post.sr = (post.sr & 0xff00) | ccr;
+    post.pc = 0x2202;
+    uint64_t before = uisa_shadow_count(op, 0);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random divw", op, 0, 0);
+  }
+  return bad;
+}
+
+static int random_bfwrite(int n) {
+  int bad = 0;
+  const int kinds[4] = {2, 4, 6, 7};   // chg clr set ins
+  for (int i = 0; i < n; i++) {
+    int kind = kinds[rnd() % 4];
+    bool mem = rnd() % 2;
+    int dreg = rnd() % 8, sreg = rnd() % 8, oreg = rnd() % 8, wreg = rnd() % 8;
+    uint16_t op = (uint16_t)(0xe8c0 | (kind << 8) | (mem ? 0x10 | 0 : dreg));   // Dn or (A0)
+    uint16_t ext = (uint16_t)((kind == 7 ? sreg << 12 : 0) | (rnd() % 2 ? 0x800 | (oreg << 6) : (rnd() % 32) << 6) |
+                              (rnd() % 2 ? 0x20 | wreg : rnd() % 32));
+    uisa_m68k_state pre = st(0x2100, 0x2700 | (rnd() & 0x1f));
+    for (int r = 0; r < 8; r++) pre.r[r] = rnd_val();
+    if (mem && (ext & 0x800)) pre.r[oreg] = (uint32_t)((int32_t)(rnd() % 200) - 100);   // small signed offsets
+    pre.r[8] = 0x10000;
+    pre.r[15] = 0x8000;
+    uisa_m68k_state post = pre;
+    int32_t offset = (ext & 0x800) ? (int32_t)pre.r[(ext >> 6) & 7] : (ext >> 6) & 31;
+    int width = ((((ext & 0x20) ? pre.r[ext & 7] : ext) - 1) & 31) + 1;
+    uint16_t ccr = pre.sr & 0x1f;
+    uint32_t ins = pre.r[(ext >> 12) & 7];
+    uint8_t bytes[5] = {0};
+    uint32_t addr = 0;
+    int nb = 0;
+    if (!mem) {
+      uint32_t v = pre.r[dreg];
+      int o = offset & 31;
+      uint32_t t = o ? (v << o) | (v >> (32 - o)) : v;
+      uint32_t old = t >> (32 - width);
+      ref_bf_insert_flags(kind == 7 ? ins & (0xffffffffu >> (32 - width)) : old, width, ccr);
+      uint32_t nf = ref_bf_new(kind, old, ins, width);
+      uint32_t keep = width == 32 ? 0 : t & ((1u << (32 - width)) - 1);
+      t = keep | (width == 32 ? nf : nf << (32 - width));
+      post.r[dreg] = o ? (t >> o) | (t << (32 - o)) : t;
+    } else {
+      addr = pre.r[8] + (offset >> 3);
+      int bo = offset & 7;
+      nb = (bo + width + 7) >> 3;
+      uint64_t v = 0;
+      for (int b = 0; b < 5; b++) { bytes[b] = (uint8_t)rnd(); v = (v << 8) | bytes[b]; }
+      int sh = 40 - bo - width;
+      uint64_t m = ((1ull << width) - 1) << sh;
+      uint32_t old = (uint32_t)((v & m) >> sh);
+      ref_bf_insert_flags(kind == 7 ? ins & (0xffffffffu >> (32 - width)) : old, width, ccr);
+      uint64_t nv = (v & ~m) | ((uint64_t)ref_bf_new(kind, old, ins, width) << sh);
+      uint64_t before = uisa_shadow_count(op, 0);
+      post.sr = (post.sr & 0xff00) | ccr;
+      post.pc = 0x2104;
+      uisa_shadow_pre(op, &pre);
+      uisa_shadow_log(UISA_LOG_IFETCH, 0x2102, 2, ext);
+      for (int b = 0; b < nb; b++) uisa_shadow_log(UISA_LOG_READ, addr + b, 1, bytes[b]);
+      for (int b = 0; b < nb; b++) uisa_shadow_log(UISA_LOG_WRITE, addr + b, 1, (uint32_t)(nv >> (32 - 8 * b)) & 0xff);
+      uisa_shadow_post(&post);
+      if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random bf (mem)", op, ext, 0);
+      continue;
+    }
+    post.sr = (post.sr & 0xff00) | ccr;
+    post.pc = 0x2104;
+    uint64_t before = uisa_shadow_count(op, 0);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2102, 2, ext);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random bf (reg)", op, ext, 0);
+  }
+  return bad;
+}
+
 int main() {
   uisa_shadow_init("build/test_shadow_report.txt");
   {  // MOVE.L (A0)+,D1: load, post-increment, N set
@@ -225,6 +430,33 @@ int main() {
       fails++;
     }
   }
+  {  // DIVU.W D1,D0 by zero: C cleared, vector 5 with a format 2 frame
+    Insn t{"divu.w d1,d0 (zero)", 0x80c1, st(0x1800, 0x2701), st(0x6200, 0x2700),
+           {{UISA_LOG_READ, 4, 0x1014, 0x6200}, {UISA_LOG_WRITE, 2, 0x7ff4, 0x2700}, {UISA_LOG_WRITE, 4, 0x7ff6, 0x1802},
+            {UISA_LOG_WRITE, 2, 0x7ffa, 0x2014}, {UISA_LOG_WRITE, 4, 0x7ffc, 0x1800}}, 0};
+    t.pre.r[15] = 0x8000; t.pre.ctl[UISA_CTL_VBR] = 0x1000; t.pre.r[0] = 100;
+    t.post.r[15] = 0x7ff4; t.post.ctl[UISA_CTL_VBR] = 0x1000; t.post.r[0] = 100;
+    run(t);
+  }
+  {  // DIVS.W #-3,D2: 100 / -3 = -33 remainder 1
+    Insn t{"divs.w #-3,d2", 0x85fc, st(0x1900, 0x2700), st(0x1904, 0x2708), {{UISA_LOG_IFETCH, 2, 0x1902, 0xfffd}}, 0};
+    t.pre.r[2] = 100; t.post.r[2] = 0x0001ffdf;
+    run(t);
+  }
+  {  // DIVU.W D1,D0 overflow: D0, N and Z unchanged, V set
+    Insn t{"divu.w d2,d0 (overflow)", 0x80c2, st(0x1a00, 0x270d), st(0x1a02, 0x270e), {}, 0};
+    t.pre.r[0] = 0x00100000; t.pre.r[2] = 2; t.post.r[0] = 0x00100000; t.post.r[2] = 2;
+    run(t);
+  }
+  {  // BFINS D3,D1{4:8}
+    Insn t{"bfins d3,d1{4:8}", 0xefc1, st(0x1b00, 0x2700), st(0x1b04, 0x2708), {{UISA_LOG_IFETCH, 2, 0x1b02, 0x3108}}, 0};
+    t.pre.r[1] = 0xffffffff; t.pre.r[3] = 0x1ab;
+    t.post.r[1] = 0xfabfffff; t.post.r[3] = 0x1ab;
+    run(t);
+  }
+  fails += random_divl(20000);
+  fails += random_divw(20000);
+  fails += random_bfwrite(20000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
