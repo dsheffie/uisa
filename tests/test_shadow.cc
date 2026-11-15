@@ -527,6 +527,59 @@ static int random_divl_pla(int n) {
   return bad;
 }
 
+// MOVES <ea>,Rn / Rn,<ea> in supervisor state, B/W/L, over (A0), (A1)+,
+// -(A1), (d16,A1) and abs.W, with Rn sometimes the EA's address register:
+// a load writes Rn after the An update, a store stores Rn's old value. A
+// byte or word load merges into Dn and sign-extends into An. All PLA flows.
+static int random_moves(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 5, sz = rnd() % 3, nb = 1 << sz;
+    static const uint16_t eas[5] = {0x10, 0x19, 0x21, 0x29, 0x38};
+    uint16_t op = (uint16_t)(0x0e00 | sz << 6 | eas[form]);
+    bool store = rnd() & 1;
+    int rn = rnd() % 4 == 0 ? (form == 0 ? 8 : 9) : rnd() % 16;
+    uint16_t ext = (uint16_t)(rn << 12 | (store ? 0x800 : 0));
+    uisa_m68k_state pre = st(0x2e00, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    pre.r[8] = 0x10000;
+    pre.r[9] = 0x20000 + (rnd() % 16) * 4;
+    pre.r[15] = 0x8000;
+    pre.ctl[UISA_CTL_SFC] = 1;
+    pre.ctl[UISA_CTL_DFC] = 1;
+    int16_t d16 = (int16_t)(((int)(rnd() % 64) - 32) & ~3);
+    uint32_t addr = 0;
+    int ilen = 4;
+    uisa_m68k_state post = pre;
+    switch (form) {
+      case 0: addr = pre.r[8]; break;
+      case 1: addr = pre.r[9]; post.r[9] += nb; break;
+      case 2: addr = pre.r[9] - nb; post.r[9] = addr; break;
+      case 3: addr = pre.r[9] + d16; ilen = 6; break;
+      case 4: addr = 0x3000 + (rnd() % 64) * 4; ilen = 6; break;
+    }
+    uint32_t m = nb == 4 ? 0xffffffffu : (1u << (8 * nb)) - 1, v = rnd_val() & m;
+    if (store) {
+      v = pre.r[rn] & m;
+    } else if (rn >= 8) {
+      post.r[rn] = nb == 1 ? (uint32_t)(int8_t)v : nb == 2 ? (uint32_t)(int16_t)v : v;
+    } else {
+      post.r[rn] = (pre.r[rn] & ~m) | v;
+    }
+    post.pc = 0x2e00 + ilen;
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2e02, 2, ext);
+    if (form == 3) uisa_shadow_log(UISA_LOG_IFETCH, 0x2e04, 2, (uint16_t)d16);
+    if (form == 4) uisa_shadow_log(UISA_LOG_IFETCH, 0x2e04, 2, addr);
+    uisa_shadow_log(store ? UISA_LOG_WRITE : UISA_LOG_READ, addr, nb, v);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random moves", op, ext, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random moves: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -919,6 +972,7 @@ int main() {
   fails += random_sr(20000);
   fails += random_mull(40000);
   fails += random_divl_pla(40000);
+  fails += random_moves(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;

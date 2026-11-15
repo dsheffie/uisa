@@ -432,6 +432,31 @@ class Expander:
             return Flow("pla", self.peephole(pre + [self.subst(x, b) for x in d[k]]))
         return [fl("u32"), None, fl("s32"), None, fl("u32q"), None, fl("s32q"), None]
 
+    MOVES_MODES = ("(An)", "(An)+", "-(An)", "(d16,An)", "(d8,An,Xn)", "abs.W", "abs.L")
+
+    def moves_variants(self, op):
+        """MOVES flows in supervisor state: [load into Dn, load into An, store]."""
+        if op & 0xFF00 != 0x0E00 or (op >> 6) & 3 == 3:
+            return None
+        ins = m68kdec.decode(op)
+        if ins.mnem != "MOVES" or ins.dst not in self.MOVES_MODES:
+            return None
+        size, w = ins.size, {"B": 8, "W": 16, "L": 32}[ins.size]
+        t = self.t
+        pre, _, base, disp, post, _ = self.fragment("dst", (ins.dst, op & 7), size, t["t2"], t["t3"], 4)
+        mem = "%s(%s)" % (disp, base)
+        ld = "%s.ga %s, %s" % ({"B": "ld.8u", "W": "ld.16u", "L": "ld.32"}[size], t["t0"], mem)
+        m = self.f["moves"]
+        out = []
+        for key in ("load_dn", "load_an"):
+            body = [self.subst(x, {"{Rn}": "{rn@2}", "{V}": t["t0"]}) for x in m[key][size]]
+            out.append(Flow("pla", self.peephole(pre + [ld] + post + body)))
+        if ins.dst in ("(An)+", "-(An)"):   # Rn may be that An: store its old value
+            out.append(Flow("pla", ["add %s, {rn@2}, x0" % t["t1"]] + pre + ["st.%d.ga %s, %s" % (w, t["t1"], mem)] + post))
+        else:
+            out.append(Flow("pla", pre + ["st.%d.ga {rn@2}, %s" % (w, mem)] + post))
+        return out
+
     def xsel_variants(self, op):
         """Second-level-decode flows of an opword as a list indexed by variant
         (None where millicode runs), or None if the opword has none."""
@@ -441,7 +466,7 @@ class Expander:
         mv = self.movec_variants(op)
         if mv:
             return [mv[k] for k in range(16)]
-        return self.sr_variants(op) or self.mull_variants(op) or self.divl_variants(op)
+        return self.sr_variants(op) or self.mull_variants(op) or self.divl_variants(op) or self.moves_variants(op)
 
     @staticmethod
     def subst(line, b):
@@ -515,6 +540,12 @@ def cmd_show(a):
                 print("   !! " + e)
         for n, v in enumerate(ex.mull_variants(op) or []):
             print("      %s: %d uops" % (("unsigned 32", "unsigned 64", "signed 32", "signed 64")[n], v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
+        for n, v in enumerate(ex.moves_variants(op) or []):
+            print("      S = 1, %s: %d uops" % (("<ea>,Dn", "<ea>,An", "Rn,<ea>")[n], v.count))
             for u in v.uops:
                 print("          " + u)
             for e in check(spec, v):

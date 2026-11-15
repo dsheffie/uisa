@@ -389,5 +389,18 @@ divl:
   u32q: ["divu.32 {Dq}, {S}"]
   s32q: ["divs.32 {Dq}, {S}"]
 
+# MOVES <ea>,Rn / Rn,<ea> in supervisor state (known at decode; user state
+# enters millicode, which raises the privilege violation). The front end picks
+# by extension bit 11 (Rn to memory) and bit 15 (An) and substitutes {Rn}
+# (bits 15:12); the EA's extension words follow at offset 4. The galt loads
+# and stores take their function code from SFC / DFC when they execute, so
+# the front end needs neither. Loads finish the An update before writing Rn
+# (so Rn wins when it is that An); stores copy Rn first (so the old value is
+# stored when Rn is the -(An) / (An)+ register). As in millicode, a byte or
+# word load merges into Dn and sign-extends into An.
+moves:
+  load_dn: {B: ["mrg8 {Rn}, {Rn}, {V}"], W: ["mrg16 {Rn}, {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
+  load_an: {B: ["sext8 {Rn}, {V}"], W: ["sext16 {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
+
 params:
   movem_regs: 5   # assumed registers per MOVEM for the uop estimate

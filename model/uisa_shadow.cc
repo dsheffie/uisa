@@ -32,7 +32,7 @@ struct uisa_fuop {
 enum { K_ILLEGAL, K_PLA, K_SEQUENCER, K_MILLICODE, K_UNMAPPED, K_NUM };
 enum { IK_CONST, IK_D16, IK_D8, IK_ABSW, IK_ABSL, IK_IMMB, IK_IMMW, IK_IMML, IK_BRW, IK_BRL, IK_PC16, IK_PC8,
        IK_BFB, IK_BFM1, IK_BFM2, IK_BFM3, IK_BFM4, IK_BFR, IK_BFI };
-enum { G_XREG = 60,      // flow register: the register named by the extension word (bitfield Dx, MOVEC Rn, MULx.L Dl)
+enum { G_XREG = 60,      // flow register: the register named by the extension word (bitfield Dx, MOVEC/MOVES Rn, MULx.L Dl, DIVx.L Dq)
        G_XREG2 = 61 };    // MULx.L Dh, DIVx.L Dr (extension bits 2:0)
 enum { G_D = 32, G_A = 40, G_PC = 48, G_SR = 49 };   // guest registers in the uisa namespace
 
@@ -614,6 +614,14 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
         xreg = G_D + ((e >> 12) & 7);
         xreg2 = G_D + (e & 7);
       }
+    }
+    // MOVES in supervisor state: load into Dn, load into An, or store
+    if ((cur_op & 0xff00) == 0x0e00 && (pre.sr & 0x2000) && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e)) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + (e & 0x800 ? 2 : e & 0x8000 ? 1 : 0);
+      flow = &FLOW_UOPS[XSEL_START[x]];
+      flow_len = XSEL_LEN[x];
+      kind = K_PLA;
+      xreg = G_D + ((e >> 12) & 15);
     }
     // MOVEC in supervisor state with M = 0: one flow per control register
     if ((cur_op & 0xfffe) == 0x4e7a && sup && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) &&
