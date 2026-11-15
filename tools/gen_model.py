@@ -11,11 +11,12 @@ extension words (IK_* below); bit 7 negates it, bit 6 adds the bitfield byte
 offset (bits 10:9 of the extension word at offset 2), and `imm` is added to
 any run-time value. Register number 60 (G_XREG) is the register named by the
 extension word at offset 2, which the front end substitutes: bits 14:12 (Dn)
-for a bitfield, bits 15:12 (Dn/An) for MOVEC.
+for a bitfield or MULx.L Dl, bits 15:12 (Dn/An) for MOVEC; register 61
+(G_XREG2) is bits 2:0 of it (MULx.L Dh).
 
-Second-level decode (XSEL): bitfield, MOVEC and MOVE to/from SR opwords have up to XSEL_NV
+Second-level decode (XSEL): bitfield, MOVEC, MOVE to/from SR and MULx.L opwords have up to XSEL_NV
 flows each, XSEL_START/LEN[XSEL_INDEX[op]*XSEL_NV + v], chosen from the
-extension word and the S and M bits (flows.yaml `bitfield:`, `movec:`, `sr:`);
+extension word and the S and M bits (flows.yaml `bitfield:`, `movec:`, `sr:`, `mull:`);
 length 0 marks a variant
 that enters millicode.
 """
@@ -35,6 +36,7 @@ BUILD = os.path.join(HERE, "..", "build")
 IK = ["CONST", "d16", "d8", "abs.W", "abs.L", "imm.B", "imm.W", "imm.L", "br.W", "br.L", "pc16", "pc8",
       "bfb", "bfm1", "bfm2", "bfm3", "bfm4", "bfr", "bfi"]
 G_XREG = 60
+G_XREG2 = 61
 XSEL_NV = 16
 KINDS = ["illegal", "pla", "sequencer", "millicode", "unmapped"]
 REF = re.compile(r"^(-?)\{([A-Za-z0-9.]+)@(\d+)(\|bf)?\}(?:\+(\d+))?$")
@@ -49,6 +51,8 @@ class Gen:
         tok = tok.strip()
         if tok in ("{dx@2}", "{rn@2}"):
             return G_XREG
+        if tok == "{dh@2}":
+            return G_XREG2
         return self.spec.regs[tok]
 
     def imm(self, tok):
@@ -123,7 +127,7 @@ def main():
         vs = g.ex.xsel_variants(op)
         if not vs:
             continue
-        nx["movec" if op in (0x4E7A, 0x4E7B) else "bitfield" if op & 0xF8C0 == 0xE8C0 else "sr"] += 1
+        nx["movec" if op in (0x4E7A, 0x4E7B) else "bitfield" if op & 0xF8C0 == 0xE8C0 else "mull" if op & 0xFFC0 == 0x4C00 else "sr"] += 1
         xsel_index[op] = len(xsel_start) // XSEL_NV
         for v in range(XSEL_NV):
             us = g.lower(vs[v]) if v < len(vs) and vs[v] else []

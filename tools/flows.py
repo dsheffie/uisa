@@ -25,6 +25,7 @@ word, see `bitfield:` in flows.yaml) also use:
                                          descriptor before it already carries it
   {dx@k}                                 the data register in bits 14:12
   {rn@k}                                 the general register in bits 15:12 (MOVEC)
+  {dh@k}                                 the data register in bits 2:0 (MULx.L Dh)
   {kind@k|bf}                            the reference plus offset / 8
   ...+N                                  any reference plus a constant
 """
@@ -48,7 +49,7 @@ SIZE_BITS = {"B": 8, "W": 16, "L": 32}
 SAMPLE = {"d16": "8", "d8": "4", "abs.W": "64", "abs.L": "64", "imm.B": "5", "imm.W": "5",
           "imm.L": "5", "br.W": "6", "br.L": "6", "pc16": "6", "pc8": "6", "xn": "d1",
           "bfb": "0", "bfm1": "8", "bfm2": "8", "bfm3": "8", "bfm4": "8", "bfr": "8", "bfi": "8",
-          "bfw": "8", "dx": "d1", "rn": "a1"}
+          "bfw": "8", "dx": "d1", "rn": "a1", "dh": "d2"}
 RUNTIME = re.compile(r"\{([A-Za-z0-9.]+)@(\d+)(?:\|bf)?\}(?:\+\d+)?")
 BF_OPS = ["BFTST", "BFEXTU", "BFCHG", "BFEXTS", "BFCLR", "BFFFO", "BFSET", "BFINS"]
 BF_MODES = {2: "(An)", 5: "(d16,An)", 6: "(d8,An,Xn)"}
@@ -389,6 +390,29 @@ class Expander:
             return [fl("imm"), fl("imm_user")]
         return None
 
+    def mull_variants(self, op):
+        """MULU.L/MULS.L flows indexed by extension bits 11:10 (u32, u64, s32, s64)."""
+        if op & 0xFFC0 != 0x4C00:
+            return None
+        src = (m68kdec.decode(op).src, op & 7)
+        if src[0] is None or src[0] == "An":
+            return None
+        t = self.t
+        pre = []
+        if src[0] == "#imm":
+            S = t["t0"]
+            pre = ["addi %s, x0, {imm.L@4}" % S]
+        else:
+            fpre, val, base, disp, post, mem = self.fragment("src", src, "L", t["t2"], t["t3"], 4)
+            if mem:
+                S = t["t0"]
+                pre = fpre + [self.load("L", S, base, disp)] + post
+            else:
+                S = val
+        b = {"{Dl}": "{dx@2}", "{Dh}": "{dh@2}", "{S}": S}
+        m = self.f["mull"]
+        return [Flow("pla", self.peephole(pre + [self.subst(x, b) for x in m[k]])) for k in ("u32", "u64", "s32", "s64")]
+
     def xsel_variants(self, op):
         """Second-level-decode flows of an opword as a list indexed by variant
         (None where millicode runs), or None if the opword has none."""
@@ -398,7 +422,7 @@ class Expander:
         mv = self.movec_variants(op)
         if mv:
             return [mv[k] for k in range(16)]
-        return self.sr_variants(op)
+        return self.sr_variants(op) or self.mull_variants(op)
 
     @staticmethod
     def subst(line, b):
@@ -466,6 +490,12 @@ def cmd_show(a):
                 continue
             what = "whole long" if n == "long" else ("register" if op & 0x38 == 0 else "field in %d byte%s" % (n, "s" if n > 1 else ""))
             print("      immediate offset/width, %s: %d uops" % (what, v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
+        for n, v in enumerate(ex.mull_variants(op) or []):
+            print("      %s: %d uops" % (("unsigned 32", "unsigned 64", "signed 32", "signed 64")[n], v.count))
             for u in v.uops:
                 print("          " + u)
             for e in check(spec, v):

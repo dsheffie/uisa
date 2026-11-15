@@ -32,7 +32,8 @@ struct uisa_fuop {
 enum { K_ILLEGAL, K_PLA, K_SEQUENCER, K_MILLICODE, K_UNMAPPED, K_NUM };
 enum { IK_CONST, IK_D16, IK_D8, IK_ABSW, IK_ABSL, IK_IMMB, IK_IMMW, IK_IMML, IK_BRW, IK_BRL, IK_PC16, IK_PC8,
        IK_BFB, IK_BFM1, IK_BFM2, IK_BFM3, IK_BFM4, IK_BFR, IK_BFI };
-enum { G_XREG = 60 };   // flow register: the register named by the extension word (bitfield Dx, MOVEC Rn)
+enum { G_XREG = 60,      // flow register: the register named by the extension word (bitfield Dx, MOVEC Rn, MULx.L Dl)
+       G_XREG2 = 61 };    // MULx.L Dh (extension bits 2:0)
 enum { G_D = 32, G_A = 40, G_PC = 48, G_SR = 49 };   // guest registers in the uisa namespace
 
 // Outcomes of a shadowed instruction.
@@ -560,7 +561,7 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   int kind = FLOW_KIND[cur_op];
   const uisa_fuop *flow = &FLOW_UOPS[FLOW_START[cur_op]];
   int flow_len = FLOW_LEN[cur_op];
-  uint32_t xreg = 0;
+  uint32_t xreg = 0, xreg2 = 0;
   if (XSEL_INDEX[cur_op] >= 0) {
     // second-level decode: a bitfield with immediate offset and width runs
     // one of the opword's XSEL flows, chosen by the bytes the field touches
@@ -590,6 +591,15 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
       flow = &FLOW_UOPS[XSEL_START[x]];
       flow_len = XSEL_LEN[x];
       kind = K_PLA;
+    }
+    // MULU.L / MULS.L: by extension bits 11:10 (signed, 64-bit result)
+    if ((cur_op & 0xffc0) == 0x4c00 && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e)) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + ((e >> 10) & 3);
+      flow = &FLOW_UOPS[XSEL_START[x]];
+      flow_len = XSEL_LEN[x];
+      kind = K_PLA;
+      xreg = G_D + ((e >> 12) & 7);
+      xreg2 = G_D + (e & 7);
     }
     // MOVEC in supervisor state with M = 0: one flow per control register
     if ((cur_op & 0xfffe) == 0x4e7a && sup && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) &&
@@ -630,6 +640,9 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
       if (x.rd == G_XREG) x.rd = (uint8_t)xreg;     // the front end's register substitution
       if (x.rs1 == G_XREG) x.rs1 = (uint8_t)xreg;
       if (x.rs2 == G_XREG) x.rs2 = (uint8_t)xreg;
+      if (x.rd == G_XREG2) x.rd = (uint8_t)xreg2;
+      if (x.rs1 == G_XREG2) x.rs1 = (uint8_t)xreg2;
+      if (x.rs2 == G_XREG2) x.rs2 = (uint8_t)xreg2;
       m.step(x);
     }
     model_pc = m.gnpc_set ? m.gnpc : pre.pc + ilen + m.full_extra;

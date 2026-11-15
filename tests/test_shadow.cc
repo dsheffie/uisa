@@ -409,6 +409,64 @@ static int random_sr(int n) {
   return bad;
 }
 
+// MULU.L / MULS.L, 32- and 64-bit results, over Dn, (A0), (A1)+, (d16,A1),
+// abs.L, #imm and (d16,PC), including Dh = Dl (the high half wins). All take
+// PLA flows.
+static int random_mull(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 7, dn = rnd() % 8;
+    static const uint16_t eas[7] = {0, 0x10, 0x19, 0x29, 0x39, 0x3c, 0x3a};
+    uint16_t op = (uint16_t)(0x4c00 | eas[form] | (form == 0 ? dn : 0));
+    bool sgn = rnd() & 1, wide = rnd() & 1;
+    int dl = rnd() % 8, dh = rnd() % 4 == 0 ? dl : rnd() % 8;
+    uint16_t ext = (uint16_t)(dl << 12 | (sgn ? 0x800 : 0) | (wide ? 0x400 : 0) | dh);
+    uisa_m68k_state pre = st(0x2a00, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    pre.r[8] = 0x10000;
+    pre.r[9] = 0x20000;
+    int16_t d16 = (int16_t)((int)(rnd() % 64) - 32) & ~3;
+    uint32_t mem = rnd_val(), addr = 0;
+    int ilen = 4;
+    switch (form) {
+      case 1: addr = pre.r[8]; break;
+      case 2: addr = pre.r[9]; break;
+      case 3: addr = pre.r[9] + d16; ilen = 6; break;
+      case 4: addr = 0x30000 + (rnd() % 64) * 4; ilen = 8; break;
+      case 5: ilen = 8; break;
+      case 6: addr = 0x2a04 + d16; ilen = 6; break;
+    }
+    uint32_t a = pre.r[dl], b = form == 0 ? pre.r[dn] : mem;
+    uisa_m68k_state post = pre;
+    if (form == 2) post.r[9] += 4;
+    uint64_t p = sgn ? (uint64_t)((int64_t)(int32_t)a * (int64_t)(int32_t)b) : (uint64_t)a * b;
+    uint32_t lo = (uint32_t)p, hi = (uint32_t)(p >> 32);
+    uint16_t ccr = pre.sr & 0x10;
+    if (wide) {
+      post.r[dl] = lo;
+      post.r[dh] = hi;
+      ccr |= (hi >> 31 ? 8 : 0) | (p == 0 ? 4 : 0);
+    } else {
+      post.r[dl] = lo;
+      bool v = sgn ? (int64_t)p != (int64_t)(int32_t)lo : hi != 0;
+      ccr |= (lo >> 31 ? 8 : 0) | (lo == 0 ? 4 : 0) | (v ? 2 : 0);
+    }
+    post.sr = (pre.sr & 0xff00) | ccr;
+    post.pc = 0x2a00 + ilen;
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2a02, 2, ext);
+    if (form == 3 || form == 6) uisa_shadow_log(UISA_LOG_IFETCH, 0x2a04, 2, (uint16_t)d16);
+    if (form == 4) { uisa_shadow_log(UISA_LOG_IFETCH, 0x2a04, 2, addr >> 16); uisa_shadow_log(UISA_LOG_IFETCH, 0x2a06, 2, addr & 0xffff); }
+    if (form == 5) { uisa_shadow_log(UISA_LOG_IFETCH, 0x2a04, 2, mem >> 16); uisa_shadow_log(UISA_LOG_IFETCH, 0x2a06, 2, mem & 0xffff); }
+    if (form != 0 && form != 5) uisa_shadow_log(UISA_LOG_READ, addr, 4, mem);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random mull", op, ext, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random mull: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -799,6 +857,7 @@ int main() {
   fails += random_bfpath(40000);
   fails += random_movec(20000);
   fails += random_sr(20000);
+  fails += random_mull(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
