@@ -38,17 +38,44 @@ rounding mode and precision. Results and SoftFloat's exception-flag byte must
 match exactly. `make` runs 20,000 cases per operation; pass a larger count
 for a longer run (`python3 tests/softfloat/test_fx80.py 500000`).
 
+## The instruction handler (millicode/fpu.c)
+
+`fpu.c` is the FPU-gen handler (opwords F200-F23F) built on this port. It
+follows Previous's `fpuop_arithmetic` step for step and is tested against it:
+`tests/fpu` links Previous's own `cpu/fpp.c` (with stubbed CPU and memory
+hooks) and runs random instructions and machine states through both, comparing
+data and address registers, FP registers, FPCR, FPSR, FPIAR, the next PC and
+the exception taken. `make` runs 20,000 cases (about 2 s); 300,000 pass, of
+which 146,000 complete normally and are compared bit for bit.
+
+Done: opclass 000/010 (FPm or `<ea>` to FPn) for the 68040's hardware set,
+every source format but packed, every addressing mode with a brief index
+word; FMOVE FPcr to/from Dn/An; the F-line and illegal traps for opmodes
+with no instruction; FPSR condition codes, exception and accrued bytes.
+
+State: FP0-FP7 in scratch memory (`CSR_SCRATCH_BASE` + 12n, FMOVEM extended
+layout), FPCR/FPSR/FPIAR in their CSRs.
+
+`fpu.c` is not in `dispatch.yaml` yet: the shadow model has no FP state and
+rejects hidden-memory accesses, so routing FPU-gen to it now would turn
+instructions that pass into failures. Hooking it up needs FP registers and
+FPCR/FPSR/FPIAR in the shadow state (and Previous's hook to fill them),
+hidden-memory support in the model, and program-space (`.gp`) loads looked
+up in the IFETCH log.
+
 ## Not done
 
-- `saveFloatx80Internal`: the unrounded intermediate the 68040's exception
-  frames carry when an enabled FP exception traps. Not needed until traps
-  are enabled.
-- int8/int16 and single/double conversions (the memory operand formats).
-  Packed decimal is never converted: the 68040 traps it.
-- The FPU instruction handler itself: FP registers in hidden memory, FPCR,
-  FPSR and FPIAR in their CSRs, decoding the FPU command word, operand
-  fetch and conversion from every source format, condition codes and the
-  accrued exception byte, FMOVE out, FMOVEM, FSAVE/FRESTORE.
+- The traps that need an FSAVE frame for the FPSP stop with a `brk` code
+  instead: unimplemented instruction (`brk 20`), unimplemented data type
+  (`brk 21`), and arithmetic exceptions (`brk 22`: an enabled exception, or
+  overflow/underflow, which a 68040 always hands to the FPSP). These need the
+  frame layouts Previous builds (`fsave_data`) and, for OVFL/UNFL/INEX,
+  `saveFloatx80Internal`: the intermediate the BUSY frame carries.
+- FMOVE FPn to `<ea>` (with int8/16/32, single and double conversion out),
+  FMOVEM of data and control registers (`brk 23`), full-format index words
+  (`brk 24`), FBcc/FScc/FDBcc/FTRAPcc, FSAVE/FRESTORE.
+- Size: the handler is about 14k words, mostly the SoftFloat operations
+  inlined once each (`op_mono` holds three copies of the rounding code).
 
 ## What the 68040 traps (and the millicode will too)
 

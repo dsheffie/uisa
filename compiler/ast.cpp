@@ -15,10 +15,12 @@
  */
 #include "ast.h"
 
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <set>
 
+#include "backend.h"
 #include "errors.h"
 
 int Type::words() const {
@@ -1058,6 +1060,26 @@ EV CallExpr::gen(CG &cg) {
     cg.line = line;
     evWords(convert(cg, v, callee->params[i].t), ops);
   }
+  if (callee->fn->isAsm && callee->fn->params.size() > (size_t)callee->fn->asmArgs) {
+    // the entry-ABI registers a hand-written routine reads: passed implicitly, in place
+    if (!cg.rootFd->entry) {
+      error(line, "'%s' reads entry-ABI registers, so only entry functions can call it", name.c_str());
+    } else {
+      for (size_t k = callee->fn->asmArgs; k < callee->fn->params.size(); k++) {
+        int reg = callee->fn->params[k]->precolor;
+        Reg *r = nullptr;
+        for (Reg *e : cg.fn->entryRegs)
+          if (e->precolor == reg) r = e;
+        if (!r) {
+          static const char *entryNames[] = {"", "opword", "ext01", "ext23", "next_pc"};   // as __opword() etc. name them
+          r = cg.fn->newReg(entryNames[reg]);
+          r->precolor = reg;
+          cg.fn->entryRegs.push_back(r);
+        }
+        ops.push_back(Operand::reg(r));
+      }
+    }
+  }
   Instr *c = new Instr(Op::Call);
   c->callee = callee->fn;
   c->a = ops;
@@ -1463,6 +1485,97 @@ void ContinueStmt::gen(CG &cg) {
 // ---------------------------------------------------------------------------
 // translation unit
 // ---------------------------------------------------------------------------
+// extern RET name(PARAMS) asm("ARGS -> RESULTS; reads R...; clobbers R...; depth N"):
+// a hand-written routine (millicode/*.s) called with a fixed register
+// contract. ARGS and RESULTS list one x register per word; `reads` names
+// entry-ABI registers (x1-x4) it reads, passed implicitly (so only entry
+// functions may call it); `clobbers` lists the other registers it may write
+// (xA-xB ranges allowed); `depth` is the return-stack entries it uses, its
+// own call included (default 1). Its argument, result and clobbered
+// registers are all treated as written by the call.
+static void declareAsm(FnDecl *fd) {
+  Function *f = fd->fn;
+  f->isAsm = true;
+  std::vector<int> args, rets, reads, clobbers;
+  std::string spec = fd->asmSpec;
+  auto bad = [&](const std::string &why) {
+    error(fd->line, "asm contract of '%s': %s", fd->name.c_str(), why.c_str());
+  };
+  auto regList = [&](const std::string &txt, std::vector<int> &out) {
+    size_t i = 0;
+    while (i < txt.size()) {
+      if (isspace((unsigned char)txt[i]) || txt[i] == ',') { i++; continue; }
+      size_t j = i;
+      while (j < txt.size() && !isspace((unsigned char)txt[j]) && txt[j] != ',') j++;
+      std::string tok = txt.substr(i, j - i);
+      i = j;
+      int a, b;
+      char x1, x2;
+      if (sscanf(tok.c_str(), "%c%d-%c%d", &x1, &a, &x2, &b) == 4 && x1 == 'x' && x2 == 'x') {
+      } else if (sscanf(tok.c_str(), "%c%d", &x1, &a) == 2 && x1 == 'x' && tok == "x" + std::to_string(a)) {
+        b = a;
+      } else {
+        bad("'" + tok + "' is not a register (x1-x31) or range");
+        continue;
+      }
+      if (a < 1 || b > numColors() || a > b) { bad("bad register '" + tok + "'"); continue; }
+      for (int r = a; r <= b; r++) out.push_back(r);
+    }
+  };
+  size_t pos = 0;
+  bool first = true;
+  while (pos <= spec.size()) {
+    size_t semi = spec.find(';', pos);
+    std::string part = spec.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos);
+    pos = semi == std::string::npos ? spec.size() + 1 : semi + 1;
+    size_t k = part.find_first_not_of(" \t");
+    if (k == std::string::npos) { first = false; continue; }
+    part = part.substr(k);
+    if (first) {
+      size_t arrow = part.find("->");
+      regList(part.substr(0, arrow), args);
+      if (arrow != std::string::npos) regList(part.substr(arrow + 2), rets);
+    } else if (part.compare(0, 6, "reads ") == 0) {
+      regList(part.substr(6), reads);
+    } else if (part.compare(0, 9, "clobbers ") == 0) {
+      regList(part.substr(9), clobbers);
+    } else if (part.compare(0, 6, "depth ") == 0) {
+      f->asmDepth = atoi(part.c_str() + 6);
+      if (f->asmDepth < 1) bad("bad depth");   // the return-stack limit is checked with the call graph
+    } else {
+      bad("unknown clause '" + part + "'");
+    }
+    first = false;
+  }
+  int words = 0;
+  for (auto &p : fd->params) {
+    if (p.ref) bad("reference parameters are not allowed");
+    words += p.t.words();
+  }
+  if ((int)args.size() != words)
+    bad(std::to_string(args.size()) + " argument registers for " + std::to_string(words) + " argument words");
+  if ((int)rets.size() != fd->ret.words())
+    bad(std::to_string(rets.size()) + " result registers for " + std::to_string(fd->ret.words()) + " result words");
+  for (int r : reads)
+    if (r > 4) bad("reads x" + std::to_string(r) + ": only the entry-ABI registers x1-x4 can be read implicitly");
+  std::set<int> written;
+  auto fixed = [&](int r, const char *n) {
+    Reg *v = f->newReg(n);
+    v->precolor = v->color = r;
+    return v;
+  };
+  for (int r : args) { f->params.push_back(fixed(r, "arg")); written.insert(r); }
+  f->asmArgs = (int)args.size();
+  for (int r : reads) f->params.push_back(fixed(r, "in"));
+  for (int r : rets) {
+    if (!written.insert(r).second && std::find(args.begin(), args.end(), r) == args.end())
+      bad("x" + std::to_string(r) + " returns two result words");
+    f->retRegs.push_back(fixed(r, "ret"));
+  }
+  for (int r : clobbers)
+    if (written.insert(r).second) f->clobberRegs.push_back(fixed(r, "clobber"));
+}
+
 Program *generateTAC(TransUnit *tu) {
   CG cg;
   cg.prog = new Program();
@@ -1501,10 +1614,11 @@ Program *generateTAC(TransUnit *tu) {
     fd->fn->returnsValue = !fd->ret.isVoid;
     fd->fn->retWords = fd->ret.words();
     fd->fn->line = fd->line;
+    if (fd->asmSpec) declareAsm(fd);
     cg.prog->funcs.push_back(fd->fn);
   }
   for (FnDecl *fd : tu->fns) {
-    if (fd->isInline) continue;
+    if (fd->isInline || fd->asmSpec) continue;
     cg.fd = fd;
     cg.rootFd = fd;
     cg.fn = fd->fn;

@@ -288,6 +288,7 @@ class FnDecl : public Node {
  public:
   Type ret; std::string name; std::vector<Param> params; Block *body; bool entry;
   bool isInline = false;   // expanded at every call; may take reference parameters
+  const char *asmSpec = nullptr;   // extern ... asm("..."): a hand-written routine's register contract
   Function *fn = nullptr;
   FnDecl(Type r, const char *n, std::vector<Param> p, Block *b, bool e)
       : ret(r), name(n), params(std::move(p)), body(b), entry(e) {}

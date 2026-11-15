@@ -67,6 +67,8 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
 "struct"            { return T_Struct; }
 "typedef"           { return T_Typedef; }
 "inline"            { return T_Inline; }
+"extern"            { return T_Extern; }
+"asm"               { return T_Asm; }
 "goto"              { return T_Goto; }
 "entry"             { return T_Entry; }
 "while"             { return T_While; }
@@ -132,6 +134,7 @@ IDENTIFIER        [a-zA-Z_][a-zA-Z_0-9]*
                       }
                       yylval.ident = strdup(yytext);
                       return T_Identifier; }
+\"[^"\n]*\"        { yylval.ident = strndup(yytext + 1, yyleng - 2); return T_String; }
 .                   { error(yylineno, "unexpected character '%c'", yytext[0]); }
 
 %%

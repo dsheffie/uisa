@@ -128,6 +128,10 @@ class Function {
  public:
   std::string name;
   bool isEntry = false;          // millicode entry point (dispatched, never called)
+  bool isAsm = false;            // hand-written routine declared with asm("..."): no body, fixed registers
+  int asmArgs = 0;               // asm: declared argument words; params after them are entry-ABI registers it reads
+  int asmDepth = 1;              // asm: return-stack entries it uses, its own call included
+  std::vector<Reg *> clobberRegs;  // asm: the other registers it may write (precolored)
   bool returnsValue = false;
   int retWords = 0;              // 32-bit words returned (2 for 64-bit types)
   int line = 0;

@@ -83,7 +83,7 @@ static bool greedyAllocate(Program *p, AllocProblem &ap, const PrefMap &prefs) {
         if (!seen.count(s)) dfs(s);
       rpo.push_back(b);
     };
-    dfs(f->blocks[0]);
+    if (!f->blocks.empty()) dfs(f->blocks[0]);
     for (auto it = rpo.rbegin(); it != rpo.rend(); ++it)
       for (Instr *i : (*it)->ins)
         if (i->dst) order.push_back(i->dst);
@@ -228,6 +228,7 @@ struct Neighbourhoods {
         }
         state[b] = 2;
       };
+      if (f->blocks.empty()) continue;   // hand-written routine
       dfs(f->blocks[0]);
       for (auto &be : back) {
         std::set<BasicBlock *> &body = bodies[be.second];

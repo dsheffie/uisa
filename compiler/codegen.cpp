@@ -558,6 +558,36 @@ bool eliminateDeadCode(Function *f) {
   return any;
 }
 
+// (x >> k) & (2^w - 1) -> one bfextui (the assembler's `extract rd, x, k, w`),
+// and a mask too wide for andi -> bfextui from bit 0. The shift dies if
+// nothing else uses it.
+static bool selectExtract(Function *f) {
+  static const IntrinsicDesc *bfx = findIntrinsic("__bfextui");
+  if (!bfx) return false;
+  recomputeDefs(f);
+  bool changed = false;
+  for (BasicBlock *b : f->blocks)
+    for (Instr *i : b->ins) {
+      if (i->op != Op::And || !i->a[0].isReg() || !i->a[1].isImm()) continue;
+      uint32_t m = (uint32_t)i->a[1].imm;
+      if (m == 0 || (m & (m + 1)) != 0 || m == 0xff || m == 0xffff || m == 0xffffffffu) continue;
+      int w = __builtin_popcount(m), k = 0;
+      Operand x = i->a[0];
+      Instr *d = x.r->def;
+      if (d && d->op == Op::Shr && d->a[1].isImm() && d->a[1].imm > 0 && d->a[1].imm + w <= 32) {
+        k = d->a[1].imm;
+        x = d->a[0];
+      } else if (m <= 0x7ff) {
+        continue;                            // andi does it
+      }
+      i->op = Op::Intrin;
+      i->in = bfx;
+      i->a = {x, Operand::cst(32 - k - w), Operand::cst(w)};
+      changed = true;
+    }
+  return changed;
+}
+
 void optimizeSSA(Function *f) {
   for (int round = 0; round < 50; round++) {
     bool c = simplify(f);
@@ -569,5 +599,6 @@ void optimizeSSA(Function *f) {
     c |= nb != f->blocks.size();
     if (!c) break;
   }
+  if (selectExtract(f)) eliminateDeadCode(f);
   recomputeDefs(f);
 }
