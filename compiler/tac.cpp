@@ -107,7 +107,7 @@ static const char *opName(Op op) {
 std::string Instr::str() const {
   std::string s;
   if (dst) s += dst->str() + " = ";
-  s += opName(op);
+  s += op == Op::Copy && !a.empty() && a[0].isImm() ? "setimm" : opName(op);   // a constant into a register
   if (op == Op::Set || op == Op::Br) s += std::string(".") + condName(cond);
   if (op == Op::Intrin) s += std::string(" ") + in->name;
   if (op == Op::Call || op == Op::CallRes) s += " " + (callee ? callee->name : std::string("?"));
