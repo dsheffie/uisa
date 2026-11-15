@@ -125,6 +125,7 @@ class BasicBlock {
   BasicBlock(int id, std::string name, Function *fn) : id(id), name(std::move(name)), fn(fn) {}
   Instr *term() const { return ins.empty() ? nullptr : ins.back(); }
   bool terminated() const { return term() && term()->isTerm(); }
+  std::string label() const { return name + "." + std::to_string(id); }   // unique, for dumps
 };
 
 class Function {

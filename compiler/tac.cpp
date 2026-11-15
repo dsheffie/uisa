@@ -114,22 +114,22 @@ std::string Instr::str() const {
   if (op == Op::PWrite) s += std::string(" ") + regName(phys);
   for (size_t i = 0; i < a.size(); i++) {
     s += (i ? ", " : " ") + a[i].str();
-    if (op == Op::Phi) s += "[" + preds[i]->name + "]";
+    if (op == Op::Phi) s += "[" + preds[i]->label() + "]";
   }
   if (op == Op::Switch) {
     s += " [" + std::to_string(swLsb) + ":" + std::to_string(swWidth) + "] ->";
-    for (BasicBlock *b : targets) s += " " + b->name;
+    for (BasicBlock *b : targets) s += " " + b->label();
   }
-  if (t) s += " -> " + t->name;
-  if (f) s += " : " + f->name;
+  if (t) s += " -> " + t->label();
+  if (f) s += " : " + f->label();
   return s;
 }
 
 void Function::print(FILE *out) const {
   fprintf(out, "function %s\n", name.c_str());
   for (BasicBlock *b : blocks) {
-    fprintf(out, "%s:  ; preds", b->name.c_str());
-    for (BasicBlock *p : b->preds) fprintf(out, " %s", p->name.c_str());
+    fprintf(out, "%s:  ; preds", b->label().c_str());
+    for (BasicBlock *p : b->preds) fprintf(out, " %s", p->label().c_str());
     fprintf(out, "\n");
     for (Instr *i : b->ins) fprintf(out, "    %s\n", i->str().c_str());
   }

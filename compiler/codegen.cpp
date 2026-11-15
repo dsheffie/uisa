@@ -136,7 +136,7 @@ void cleanCFG(Function *f) {
     if (p->succs.size() < 2) continue;
     for (BasicBlock *s : std::vector<BasicBlock *>(p->succs)) {
       if (s->preds.size() < 2) continue;
-      BasicBlock *e = f->newBlock("edge");
+      BasicBlock *e = f->newBlock(p->name + "_" + s->name + "_crit_edge");
       Instr *j = new Instr(Op::Jmp);
       j->t = s;
       e->ins.push_back(j);
