@@ -1,11 +1,13 @@
 // iss.h: a small uisa instruction-set simulator for millicode tests, built
 // from the generated decoder and semantics (build/uisa.h, uisa_sem.inc).
 // Guest memory reads come from membyte(), which the includer defines.
-// Stores are not modelled (a store ends the run with an error).
+// Hidden-memory (space h) loads and stores use `hmem`. A guest store ends the
+// run with an error unless the includer defines ISS_GUEST_STORE(addr, n, v).
 #ifndef UCC_TEST_ISS_H
 #define UCC_TEST_ISS_H
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -23,11 +25,23 @@ struct Machine {
   int exitv = 0;
   std::string err;
   unsigned steps = 0, maxDepth = 0;
+  std::map<uint32_t, uint8_t> hmem;   // hidden memory, sparse; unwritten bytes read 0
 
   uint32_t load(uint32_t a, int n) {
     uint32_t v = 0;
     for (int i = 0; i < n; i++) v = (v << 8) | membyte(a + i);
     return v;
+  }
+  uint32_t hload(uint32_t a, int n) {
+    uint32_t v = 0;
+    for (int i = 0; i < n; i++) {
+      auto it = hmem.find(a + i);
+      v = (v << 8) | (it == hmem.end() ? 0 : it->second);
+    }
+    return v;
+  }
+  void hstore(uint32_t a, int n, uint32_t v) {
+    for (int i = 0; i < n; i++) hmem[a + i] = (uint8_t)(v >> (8 * (n - 1 - i)));
   }
   void cstack_push(uint32_t v) {
     if (cstack.size() >= 4) err = "return stack overflow";
@@ -85,11 +99,17 @@ struct Machine {
       if (o.is_probe) {
         R[d.rd] = 1;                               // MMUSR with R set: a resident translation
       } else if (o.is_load) {
-        uint32_t v = load(a + d.imm, o.mem_bytes);
+        uint32_t v = d.sp == 0 ? hload(a + d.imm, o.mem_bytes) : load(a + d.imm, o.mem_bytes);
         if (o.load_signed) v = (uint32_t)SX(v, 8 * o.mem_bytes);
         R[d.rd] = v;
       } else if (o.is_store) {
-        err = "store";
+        if (o.wb != 0 || d.op == UISA_GPUSHR) err = "store with writeback";
+        else if (d.sp == 0) hstore(a + d.imm, o.mem_bytes, R[d.rd]);
+#ifdef ISS_GUEST_STORE
+        else ISS_GUEST_STORE(a + d.imm, o.mem_bytes, R[d.rd]);
+#else
+        else err = "store";
+#endif
       } else if (o.gform != GF_NONE) {
         gop_out g = gop_eval(o.gfn, o.gsize_bits, a, b, X, N, Z, V, C);
         if (o.writes_rd) R[d.rd] = gop_writeback(o.gform, o.gsize_bits, R[d.rd], g.r);

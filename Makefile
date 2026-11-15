@@ -36,6 +36,7 @@ test: $(GEN) compiler
 	./build/test_cxx
 	python3 compiler/tests/test_ucc.py
 	python3 tests/softfloat/test_fx80.py 20000
+	python3 tests/fpu/test_fpu.py 20000
 	python3 tools/gen_model.py >/dev/null
 	python3 tools/gen_millicode.py >/dev/null
 	c++ -std=c++17 -O1 -Ibuild -Imodel -o build/test_shadow tests/test_shadow.cc model/uisa_shadow.cc
