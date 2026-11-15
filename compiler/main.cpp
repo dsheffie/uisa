@@ -94,7 +94,7 @@ static void checkCallGraph(Program *p) {
     }
     state[f] = 1;
     path.push_back(f);
-    int d = 0;
+    int d = f->isAsm ? f->asmDepth - 1 : 0;
     for (Function *g : f->callees) d = std::max(d, 1 + visit(g));
     path.pop_back();
     state[f] = 2;
@@ -102,6 +102,7 @@ static void checkCallGraph(Program *p) {
   };
   for (Function *f : p->funcs) {
     int d = visit(f);
+    if (f->isAsm) continue;
     int frames = f->isEntry ? d : d + 1;   // a helper is itself entered by a call
     if (frames > spec::CALL_STACK_DEPTH)
       error(f->line, "'%s' nests %d calls but the millicode return stack holds %d", f->name.c_str(), frames,
@@ -141,20 +142,25 @@ int main(int argc, char **argv) {
   stopOnErrors();
   Program *prog = generateTAC(parse_result);
   stopOnErrors();
-  for (Function *f : prog->funcs) cleanCFG(f);
+  for (Function *f : prog->funcs)
+    if (!f->isAsm) cleanCFG(f);
   stopOnErrors();
-  for (Function *f : prog->funcs) buildSSA(f);
+  for (Function *f : prog->funcs)
+    if (!f->isAsm) buildSSA(f);
   stopOnErrors();
-  for (Function *f : prog->funcs) optimizeSSA(f);
+  for (Function *f : prog->funcs)
+    if (!f->isAsm) optimizeSSA(f);
   checkCallGraph(prog);
   stopOnErrors();
   for (Function *f : prog->funcs) {
+    if (f->isAsm) continue;
     legalize(f);
     f->rebuildEdges();
     computeLoopDepth(f);
   }
   if (dumpTac)
-    for (Function *f : prog->funcs) f->print(stderr);
+    for (Function *f : prog->funcs)
+      if (!f->isAsm) f->print(stderr);
   AllocProblem ap;
   buildAllocProblem(prog, ap);
   stopOnErrors();

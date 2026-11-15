@@ -40,6 +40,8 @@ static void declareTypeName(const char *n, const Type &t) {
   TransUnit *tu;
 }
 
+%token T_Extern T_Asm
+%token <ident> T_String
 %token T_Void T_Const T_Entry T_Struct T_Typedef T_Inline T_Goto T_While T_Do T_For T_If T_Else T_Switch T_Case T_Default
 %token T_Return T_Break T_Continue T_Le T_Ge T_Eq T_Ne T_And T_Or T_Shl T_Shr T_Inc T_Dec
 %token <type> T_Type
@@ -99,6 +101,8 @@ FunctionDecl: RetType T_Identifier '(' Params ')' Block
                                          { $$ = new FnDecl(*$2, $3, *$5, $7, false); $$->isInline = true; }
             | T_Entry RetType T_Identifier '(' Params ')' Block
                                          { $$ = new FnDecl(*$2, $3, *$5, $7, true); }
+            | T_Extern RetType T_Identifier '(' Params ')' T_Asm '(' T_String ')' ';'
+                                         { $$ = new FnDecl(*$2, $3, *$5, nullptr, false); $$->asmSpec = $9; }
             ;
 
 RetType     : TypeSpec                   { $$ = $1; }

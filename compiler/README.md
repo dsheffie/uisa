@@ -69,9 +69,24 @@ Labels must be unique across all sources (checked). `millicode/bitfield.c`
 - `entry void name(void)` declares a millicode entry point: it is dispatched
   to (never called), may use the entry-ABI intrinsics, cannot return, and
   every path must end in a no-return intrinsic (`__gexit`, `__gfault`, ...).
+- `extern T name(params) asm("ARGS -> RESULTS; reads R...; clobbers R...;
+  depth N");` declares a hand-written routine in `millicode/*.s` and its
+  register contract, so C millicode can call shared assembly helpers. ARGS
+  and RESULTS name one x register per word (a two-word struct result comes
+  back in two); `reads` lists entry-ABI registers (x1-x4) the routine reads,
+  which the compiler passes implicitly and which keep their values up to the
+  call (so only entry functions may call such a routine); `clobbers` lists
+  the other registers it may write (`x16-x19` ranges allowed); `depth` is
+  the return-stack entries it uses, its own call included (default 1). The
+  argument, result and clobbered registers are all treated as written by the
+  call: nothing live across it is allocated to them, and a fixed register
+  (an entry-ABI value) still needed after the call is an error. Example
+  (`millicode/bitfield.c`):
+  `extern ea_res ea_addr(u32 ea, u32 size, u32 ext_off) asm("x20 x21 x22 ->
+  x23 x4; reads x2 x3 x4; clobbers x16-x19 x24-x26; depth 3");`
 - Not in the language: pointers, arrays, unions, floats, globals that are
-  not constants, `goto`, the comma operator, char and string literals, and
-  the preprocessor beyond `#include`.
+  not constants, the comma operator, char literals, string literals outside
+  `asm("...")`, and the preprocessor beyond `#include`.
 
 ## 64-bit types
 
@@ -93,6 +108,9 @@ Intrinsic arguments take the low word of a 64-bit value (C conversion to
 `u32`).
 
 ## Intrinsics
+
+`(x >> k) & (2^w - 1)` compiles to one `bfextui` (the assembler's `extract
+rd, x, k, w`), as does a mask too wide for `andi`.
 
 `compiler/gen_intrinsics.py` generates the intrinsic table from
 `spec/uisa.yaml` through `tools/uisa.py`; nothing is hand-maintained. Every

@@ -92,7 +92,7 @@ bool lookup(int kind, uint32_t addr, int n, uint32_t &out) {
     uint8_t byte = 0;
     for (int e = 0; e < log_n; e++) {
       const LogEntry &L = log_buf[e];
-      if (L.kind != kind || a < L.addr || a >= L.addr + L.size) continue;
+      if (L.kind != kind || a - L.addr >= (uint32_t)L.size) continue;   // wraps at 2^32
       byte = (uint8_t)(L.value >> (8 * (L.size - 1 - (a - L.addr))));
       found = true;
     }

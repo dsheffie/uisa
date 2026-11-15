@@ -2,6 +2,11 @@
 // log, post-state), as the host emulator would.
 #include <cstdio>
 #include <cstring>
+#include <vector>
+
+#ifndef BF_FULL_OK
+#define BF_FULL_OK true   // millicode/bitfield.c handles full-format index words
+#endif
 #include "uisa_shadow.h"
 
 static int fails = 0;
@@ -237,6 +242,96 @@ static int random_bfwrite(int n) {
     uisa_shadow_log(UISA_LOG_IFETCH, 0x2102, 2, ext);
     uisa_shadow_post(&post);
     if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random bf (reg)", op, ext, 0);
+  }
+  return bad;
+}
+
+// BFTST / BFEXTU / BFEXTS / BFFFO on a register or memory field, through
+// several control addressing modes (including full-format index words).
+// Returns failures; `full_ok` = whether full-format words must work.
+static int random_bfread(int n, bool full_ok) {
+  int bad = 0;
+  const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
+  for (int i = 0; i < n; i++) {
+    int kind = kinds[rnd() % 4];
+    int form = rnd() % 8;              // 0 Dn, 1 (A0), 2 (d16,A1), 3 (d8,A2,Xn), 4 abs.L, 5 (d16,PC), 6 (d8,PC,Xn), 7 full index
+    int dreg = rnd() % 8, oreg = rnd() % 8, wreg = rnd() % 8, dn = rnd() % 8;
+    static const uint16_t ea[8] = {0, 0x10, 0x29, 0x32, 0x39, 0x3a, 0x3b, 0x33};
+    uint16_t op = (uint16_t)(0xe8c0 | (kind << 8) | (form ? ea[form] : dreg));
+    uint16_t ext = (uint16_t)((dn << 12) | (rnd() % 2 ? 0x800 | (oreg << 6) : (rnd() % 32) << 6) |
+                              (rnd() % 2 ? 0x20 | wreg : rnd() % 32));
+    uint32_t pc = 0x2100;
+    uisa_m68k_state pre = st(pc, 0x2700 | (rnd() & 0x1f));
+    for (int r = 0; r < 8; r++) pre.r[r] = rnd_val();
+    if (form && (ext & 0x800)) pre.r[oreg] = (uint32_t)((int32_t)(rnd() % 200) - 100);
+    for (int r = 8; r < 15; r++) pre.r[r] = 0x10000 + 0x1000 * (r - 8);
+    pre.r[15] = 0x8000;
+    int32_t offset = (ext & 0x800) ? (int32_t)pre.r[(ext >> 6) & 7] : (ext >> 6) & 31;
+    int width = ((((ext & 0x20) ? pre.r[ext & 7] : ext) - 1) & 31) + 1;
+    std::vector<std::pair<uint32_t, uint32_t>> words;   // extension words after the bitfield word
+    uint32_t addr = 0;
+    int xr = rnd() % 8;                                // index register: D0-D7
+    uint16_t xw;
+    switch (form) {
+    case 1: addr = pre.r[8]; break;
+    case 2: { int16_t d = (int16_t)rnd(); words.push_back({0, (uint16_t)d}); addr = pre.r[9] + d; break; }
+    case 3: case 6: {
+      xw = (uint16_t)((xr << 12) | (rnd() & 0x0eff));
+      words.push_back({0, xw});
+      uint32_t x = pre.r[xr];
+      if (!(xw & 0x800)) x = (uint32_t)(int32_t)(int16_t)x;
+      addr = (form == 3 ? pre.r[10] : pc + 4) + (int8_t)xw + (x << ((xw >> 9) & 3));
+      break;
+    }
+    case 4: addr = 0x30000 + (rnd() & 0xffff); words.push_back({0, addr >> 16}); words.push_back({0, addr & 0xffff}); break;
+    case 5: { int16_t d = (int16_t)rnd(); words.push_back({0, (uint16_t)d}); addr = pc + 4 + d; break; }
+    case 7: {   // full format: base A3 + bd.W + Xn*scale, no memory indirection
+      xw = (uint16_t)((xr << 12) | (rnd() & 0x0e00) | 0x100 | 0x20);
+      int16_t bd = (int16_t)rnd();
+      words.push_back({0, xw}); words.push_back({0, (uint16_t)bd});
+      uint32_t x = pre.r[xr];
+      if (!(xw & 0x800)) x = (uint32_t)(int32_t)(int16_t)x;
+      addr = pre.r[11] + bd + (x << ((xw >> 9) & 3));
+      break;
+    }
+    }
+    uint32_t field;                  // left-justified
+    uint8_t bytes[5];
+    int nb = 0;
+    if (!form) {
+      int o = offset & 31;
+      uint32_t v = pre.r[dreg];
+      field = o ? (v << o) | (v >> (32 - o)) : v;
+    } else {
+      addr += offset >> 3;
+      int bo = offset & 7;
+      nb = (bo + width + 7) >> 3;
+      uint64_t v = 0;
+      for (int b = 0; b < 5; b++) { bytes[b] = (uint8_t)rnd(); v = (v << 8) | bytes[b]; }
+      field = (uint32_t)(v >> (8 - bo));
+    }
+    uint32_t val = width == 32 ? field : field >> (32 - width);
+    uisa_m68k_state post = pre;
+    uint16_t ccr = pre.sr & 0x10;
+    if (val == 0) ccr |= 4;
+    if (field & 0x80000000u) ccr |= 8;
+    post.sr = (uint16_t)((pre.sr & 0xff00) | ccr);
+    post.pc = pc + 4 + 2 * (uint32_t)words.size();
+    if (kind == 1) post.r[dn] = val;
+    if (kind == 3) post.r[dn] = width == 32 ? field : (uint32_t)((int32_t)field >> (32 - width));
+    if (kind == 5) {
+      int pos = 0;
+      while (pos < width && !(field & (0x80000000u >> pos))) pos++;
+      post.r[dn] = (uint32_t)offset + pos;
+    }
+    uint64_t before = uisa_shadow_count(op, 0);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, pc + 2, 2, ext);
+    for (size_t w = 0; w < words.size(); w++) uisa_shadow_log(UISA_LOG_IFETCH, pc + 4 + 2 * (uint32_t)w, 2, words[w].second);
+    for (int b = 0; b < nb; b++) uisa_shadow_log(UISA_LOG_READ, addr + b, 1, bytes[b]);
+    uisa_shadow_post(&post);
+    if (form == 7 && !full_ok) continue;
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random bf read", op, ext, form);
   }
   return bad;
 }
@@ -563,6 +658,7 @@ int main() {
   fails += random_divl(20000);
   fails += random_divw(20000);
   fails += random_bfwrite(20000);
+  fails += random_bfread(40000, BF_FULL_OK);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
