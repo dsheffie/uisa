@@ -1,6 +1,7 @@
 /* tac.cpp: TAC printing, edge maintenance and the spec-generated tables. */
 #include "tac.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
@@ -99,7 +100,7 @@ bool Instr::hasSideEffects() const {
 static const char *opName(Op op) {
   static const char *n[] = {"copy", "add", "sub", "mul", "div", "divu", "rem", "remu", "and", "or", "xor",
                             "shl", "shr", "sar", "set", "sext8", "sext16", "zext8", "zext16", "intrin",
-                            "call", "callres", "phi", "pwrite", "br", "jmp", "ret", "stop"};
+                            "call", "callres", "phi", "pwrite", "br", "jmp", "switch", "ret", "stop"};
   return n[(int)op];
 }
 
@@ -114,6 +115,10 @@ std::string Instr::str() const {
   for (size_t i = 0; i < a.size(); i++) {
     s += (i ? ", " : " ") + a[i].str();
     if (op == Op::Phi) s += "[" + preds[i]->name + "]";
+  }
+  if (op == Op::Switch) {
+    s += " [" + std::to_string(swLsb) + ":" + std::to_string(swWidth) + "] ->";
+    for (BasicBlock *b : targets) s += " " + b->name;
   }
   if (t) s += " -> " + t->name;
   if (f) s += " : " + f->name;
@@ -141,6 +146,8 @@ void Function::rebuildEdges() {
     if (!t) continue;
     if (t->t) b->succs.push_back(t->t);
     if (t->f && t->f != t->t) b->succs.push_back(t->f);
+    for (BasicBlock *s : t->targets)
+      if (std::find(b->succs.begin(), b->succs.end(), s) == b->succs.end()) b->succs.push_back(s);
     for (BasicBlock *s : b->succs) s->preds.push_back(b);
   }
 }

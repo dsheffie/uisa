@@ -1347,9 +1347,52 @@ void ForStmt::gen(CG &cg) {
   cg.scopes.pop_back();
 }
 
+// A literal or a named constant's value, without generating code.
+static bool constValue(CG &cg, Expr *x, uint64_t &out) {
+  if (auto *l = dynamic_cast<IntLit *>(x)) { out = l->value; return true; }
+  if (auto *r = dynamic_cast<VarRef *>(x)) {
+    Sym *s = cg.lookup(r->name);
+    if (s && s->isConst) { out = s->cval; return true; }
+  }
+  return false;
+}
+
+// Switch lowering. Three or more cases with small values become an n-way
+// bx: `switch ((x >> k) & (2^w - 1))` indexes the table with that field of x
+// directly; any other switch whose cases lie in 0..63 checks the range first.
+// Otherwise a compare chain.
 void SwitchStmt::gen(CG &cg) {
   cg.line = line;
-  EV v = e->gen(cg);
+  Expr *field = nullptr;   // x of (x >> k) & mask
+  int lsb = 0, fw = 0, ncase = 0;
+  for (Stmt *s : body->stmts)
+    if (auto *cl = dynamic_cast<CaseLabel *>(s))
+      if (cl->value) ncase++;
+  if (auto *be = ncase >= 3 ? dynamic_cast<BinaryExpr *>(e) : nullptr) {
+    uint64_t m, k;
+    if (be->op == '&' && constValue(cg, be->r, m) && m && m <= 0x7fff && !(m & (m + 1))) {
+      fw = __builtin_popcountll(m);
+      field = be->l;
+      auto *sh = dynamic_cast<BinaryExpr *>(be->l);
+      if (sh && sh->op == 'R' && constValue(cg, sh->r, k) && k > 0 && k + fw <= 32) {
+        lsb = (int)k;
+        field = sh->l;
+      }
+    }
+  }
+  EV v, fv;
+  if (field) {
+    fv = field->gen(cg);
+    needValue(fv, line);
+    if (fv.ty.is64() || fv.isConst()) {   // not for bx: rebuild the plain value
+      field = nullptr;
+      v = e->gen(cg);
+    } else {
+      v = EV{fv.op, promote(fv.ty)};
+    }
+  } else {
+    v = e->gen(cg);
+  }
   needValue(v, line);
   Type st = promote(v.ty);
   SwitchCtx ctx;
@@ -1378,6 +1421,28 @@ void SwitchStmt::gen(CG &cg) {
     order.push_back({kv, b});
   }
   cg.line = line;
+  uint64_t maxv = 0;
+  for (auto &p : order) maxv = std::max(maxv, p.first);
+  int tw = 0;                                // table index width
+  if (field) tw = fw;
+  else if (!st.is64() && maxv < 64) while ((1ull << tw) <= maxv) tw++;
+  if (order.size() >= 3 && tw > 0) {
+    BasicBlock *other = def ? def : X;
+    Operand x = field ? fv.op : sv.op;
+    if (!field) {                            // out of the table's range: default
+      BasicBlock *in = cg.block("swtable");
+      cg.br(Cond::GEU, x, Operand::cst(1 << tw), other, in);
+      cg.cur = in;
+    }
+    Instr *s = new Instr(Op::Switch);
+    s->a = {x};
+    s->swLsb = lsb;
+    s->swWidth = tw;
+    for (uint64_t n = 0; n < (1ull << tw); n++) s->targets.push_back(cases.count(n) ? cases[n] : other);
+    cg.emit(s);
+    order.clear();                           // no compare chain
+    cg.endWithDeadBlock();
+  }
   for (auto &p : order) {
     BasicBlock *next = cg.block("swnext");
     if (st.is64()) br64(cg, Cond::EQ, sv, constOf(p.first, st), p.second, next);

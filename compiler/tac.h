@@ -81,6 +81,7 @@ enum class Op {
   // terminators
   Br,                                            // if (a0 cond a1) goto t else f
   Jmp,                                           // goto t
+  Switch,                                        // goto targets[(a0 >> swLsb) & (2^swWidth - 1)] (bx)
   Ret,                                           // return [a0 [, a1]]
   Stop,                                          // control ended in a noreturn intrinsic
 };
@@ -94,13 +95,15 @@ class Instr {
   const IntrinsicDesc *in = nullptr;
   Function *callee = nullptr;
   BasicBlock *t = nullptr, *f = nullptr;
+  std::vector<BasicBlock *> targets;             // Switch: one per table slot (2^swWidth)
+  int swLsb = 0, swWidth = 0;                    // Switch: the index field of a0
   std::vector<BasicBlock *> preds;               // phi incoming blocks, parallel to a
   int phys = 0;                                  // PWrite target
   int line = 0;
   int disp = 0;                                  // displacement folded into the address argument
   bool falloff = false;                          // Stop: control reached the end of the function
   Instr(Op op) : op(op) {}
-  bool isTerm() const { return op == Op::Br || op == Op::Jmp || op == Op::Ret || op == Op::Stop; }
+  bool isTerm() const { return op == Op::Br || op == Op::Jmp || op == Op::Switch || op == Op::Ret || op == Op::Stop; }
   bool hasSideEffects() const;
   std::string str() const;
 };

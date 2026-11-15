@@ -109,6 +109,14 @@ Intrinsic arguments take the low word of a 64-bit value (C conversion to
 
 ## Intrinsics
 
+A `switch` with three or more cases becomes an n-way `bx` jump table (one
+`jal` slot per value) when its cases are small: `switch ((x >> k) & (2^w -
+1))` (k and the mask literals or named constants, w <= 15) indexes the table
+with that field of x directly, with no range check; any other 32-bit switch
+whose cases all lie in 0..63 checks the range (one branch to default) and
+then indexes. Other switches (negative or larger cases, 64-bit values, fewer
+cases) are compare chains.
+
 `(x >> k) & (2^w - 1)` compiles to one `bfextui` (the assembler's `extract
 rd, x, k, w`), as does a mask too wide for `andi`.
 

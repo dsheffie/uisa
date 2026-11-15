@@ -39,7 +39,7 @@ entry void bitfield(void) {
     u32 a = r.addr + ((s32)offset >> 3);
     u32 bit = offset & 7;
     desc = bit | (wfield << 5);
-    switch ((bit + width + 7) >> 3) {        // bytes touched
+    switch (((bit + width + 7) >> 3) & 7) {  // bytes touched (1-5)
       case 1: src = __ld_8u_gd(a) << 24; break;
       case 2: src = __ld_16u_gd(a) << 16; break;
       case 3: src = (__ld_16u_gd(a) << 16) | (__ld_8u_gd(a + 2) << 8); break;

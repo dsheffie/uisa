@@ -170,6 +170,9 @@ void legalize(Function *f) {
           needReg(i, 0);
           needReg(i, 1);
           break;
+        case Op::Switch:
+          needReg(i, 0);
+          break;
         case Op::Ret:
           for (size_t k = 0; k < a.size(); k++) needReg(i, k);
           break;
@@ -777,6 +780,10 @@ static void emitFunction(Function *f, FILE *out) {
         }
         break;
       }
+      case Op::Switch:   // bx, then one jal slot per table entry
+        E.text("bx " + R(t->a[0]) + ", " + std::to_string(t->swLsb) + ", " + std::to_string(t->swWidth));
+        for (BasicBlock *s : t->targets) E.jump(blockLabel(final(s)));
+        break;
       case Op::Ret:
       {
         std::vector<std::pair<std::string, std::string>> moves;

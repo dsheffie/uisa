@@ -21,6 +21,15 @@
 static void retarget(Instr *t, BasicBlock *from, BasicBlock *to) {
   if (t->t == from) t->t = to;
   if (t->f == from) t->f = to;
+  for (BasicBlock *&b : t->targets)
+    if (b == from) b = to;
+  if (t->op == Op::Switch &&
+      std::all_of(t->targets.begin(), t->targets.end(), [&](BasicBlock *b) { return b == t->targets[0]; })) {
+    t->op = Op::Jmp;
+    t->t = t->targets[0];
+    t->targets.clear();
+    t->a.clear();
+  }
   if (t->op == Op::Br && t->t == t->f) {
     t->op = Op::Jmp;
     t->f = nullptr;
@@ -134,6 +143,8 @@ void cleanCFG(Function *f) {
       Instr *t = p->term();
       if (t->t == s) t->t = e;
       if (t->f == s) t->f = e;
+      for (BasicBlock *&b : t->targets)
+        if (b == s) b = e;
     }
   }
   pruneUnreachable(f);
@@ -481,6 +492,16 @@ static bool simplify(Function *f) {
           }
           break;
         }
+        case Op::Switch:
+          if (a[0].isImm()) {   // a constant index: one way
+            BasicBlock *to = i->targets[((uint32_t)a[0].imm >> i->swLsb) & ((1u << i->swWidth) - 1)];
+            i->op = Op::Jmp;
+            i->t = to;
+            i->targets.clear();
+            a.clear();
+            changed = true;
+          }
+          break;
         case Op::Br:
           if (a[0].isImm() && a[1].isImm()) {
             BasicBlock *to = evalCond(i->cond, a[0].imm, a[1].imm) ? i->t : i->f;
