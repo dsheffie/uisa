@@ -580,6 +580,88 @@ static int random_moves(int n) {
   return bad;
 }
 
+// 68k condition code cc (0-15) on CCR flags
+static bool ref_cc(int cc, uint16_t ccr) {
+  bool c = ccr & 1, v = ccr & 2, z = ccr & 4, nf = ccr & 8;
+  switch (cc) {
+    case 0: return true;   case 1: return false;
+    case 2: return !c && !z; case 3: return c || z;
+    case 4: return !c;     case 5: return c;
+    case 6: return !z;     case 7: return z;
+    case 8: return !v;     case 9: return v;
+    case 10: return !nf;   case 11: return nf;
+    case 12: return nf == v; case 13: return nf != v;
+    case 14: return !z && nf == v; default: return z || nf != v;
+  }
+}
+
+// DBcc Dn,disp for every condition, flag state and count (0 and 0xffff
+// included): cc true falls through untouched; otherwise Dn.W -= 1 and the
+// branch is taken unless the old count was 0.
+static int random_dbcc(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int cc = rnd() % 16, r = rnd() % 8;
+    uint16_t op = (uint16_t)(0x50c8 | cc << 8 | r);
+    int16_t disp = (int16_t)(((int)(rnd() % 256) - 128) & ~1);
+    uisa_m68k_state pre = st(0x3000, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    int pick = rnd() % 4;
+    if (pick == 0) pre.r[r] &= 0xffff0000;
+    if (pick == 1) pre.r[r] |= 0xffff;
+    uisa_m68k_state post = pre;
+    post.pc = 0x3004;
+    if (!ref_cc(cc, pre.sr & 0x1f)) {
+      uint16_t cnt = (uint16_t)pre.r[r];
+      post.r[r] = (pre.r[r] & 0xffff0000) | (uint16_t)(cnt - 1);
+      if (cnt != 0) post.pc = 0x3002 + disp;
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x3002, 2, (uint16_t)disp);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random dbcc", op, (uint16_t)disp, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random dbcc: expected a PLA flow", op, 0, 0);
+  }
+  return bad;
+}
+
+// CMPM (Ay)+,(Ax)+ in B/W/L, including Ax = Ay (the second read is from the
+// incremented address) and A7 bytes (steps of 2). Flags of Ax-value - Ay-value.
+static int random_cmpm(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int sz = rnd() % 3, nb = 1 << sz, ay = rnd() % 8, ax = rnd() % 4 == 0 ? ay : rnd() % 8;
+    uint16_t op = (uint16_t)(0xb108 | ax << 9 | sz << 6 | ay);
+    uisa_m68k_state pre = st(0x3200, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 8; k++) pre.r[k] = rnd_val();
+    for (int k = 8; k < 16; k++) pre.r[k] = 0x40000 + (uint32_t)(k - 8) * 0x1000 + (rnd() % 16) * 4;
+    int incy = (nb == 1 && ay == 7) ? 2 : nb, incx = (nb == 1 && ax == 7) ? 2 : nb;
+    uint32_t m = nb == 4 ? 0xffffffffu : (1u << (8 * nb)) - 1;
+    uint32_t sa = pre.r[8 + ay], da = (ax == ay ? sa + incy : pre.r[8 + ax]);
+    uint32_t sv = rnd_val() & m, dv = rnd() % 4 == 0 ? sv : rnd_val() & m;
+    uisa_m68k_state post = pre;
+    post.r[8 + ay] += incy;
+    post.r[8 + ax] = da + incx;
+    uint32_t res = (dv - sv) & m, sb = 1u << (8 * nb - 1);
+    uint16_t ccr = pre.sr & 0x10;
+    if (res & sb) ccr |= 8;
+    if (res == 0) ccr |= 4;
+    if (((dv ^ sv) & (dv ^ res)) & sb) ccr |= 2;
+    if (sv > dv) ccr |= 1;
+    post.sr = (pre.sr & 0xff00) | ccr;
+    post.pc = 0x3202;
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_READ, sa, nb, sv);
+    uisa_shadow_log(UISA_LOG_READ, da, nb, dv);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random cmpm", op, 0, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random cmpm: expected a PLA flow", op, 0, 0);
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -973,6 +1055,8 @@ int main() {
   fails += random_mull(40000);
   fails += random_divl_pla(40000);
   fails += random_moves(40000);
+  fails += random_dbcc(40000);
+  fails += random_cmpm(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;

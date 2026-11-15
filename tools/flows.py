@@ -113,6 +113,8 @@ class Expander:
                 return ("#q", None), (ins.dst, lo)
             return None, (ins.dst, lo)
         if line in (8, 9, 0xB, 0xC, 0xD):
+            if m == "CMPM":                     # CMPM (Ay)+,(Ax)+
+                return ("(An)+", lo), ("(An)+", hi)
             if m in ("ADDX", "SUBX"):
                 return (ins.src, lo), (ins.dst, hi)
             opm = (op >> 6) & 7
@@ -228,7 +230,7 @@ class Expander:
         if op >> 12 == 6:
             d = op & 0xFF
             b["{disp_br}"] = "{br.W@2}" if d == 0 else "{br.L@2}" if d == 0xFF else str(2 + sext8(d))
-        if key == "DBF":
+        if key in ("DBF", "DBcc"):
             b["{disp_br}"] = "{br.W@2}"
         if key == "LINK":
             b["{imm}"] = "{imm.%s@2}" % ("W" if ins.size == "W" else "L")

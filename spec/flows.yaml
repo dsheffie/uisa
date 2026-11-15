@@ -102,6 +102,7 @@ ops:
   SUBX: {src: read, dst: rmw, g: subx, template: alu}
   CMP: {src: read, dst: read, g: cmp, template: compare}
   CMPI: {src: read, dst: read, g: cmp, template: compare}
+  CMPM: {src: read, dst: read, g: cmp, template: compare}   # (Ay)+ is updated before (Ax)+ is read
   ADDQ:
     src: read
     dst: rmw
@@ -183,6 +184,13 @@ ops:
   DBF:
     dst: rmw
     any: ["subi.16.nf {D}, 1", "addi {T}, {D}, 1", "zext16 {T}, {T}", "gbnz {T}, {disp_br}"]
+  # DBcc: when cc holds, Dn is unchanged and the instruction falls through;
+  # otherwise Dn.W -= 1 and it branches unless the old count was 0. Both
+  # choices are made with sel on cc, so the only branch is the guest branch.
+  DBcc:
+    dst: rmw
+    any: ["zext16 x28, {D}", "addi {T}, {D}, -1", "sel.{cc} {T}, {D}, {T}", "mrg16 {D}, {D}, {T}",
+          "sel.{cc} x28, x0, x28", "gbnz x28, {disp_br}"]
   RTS: {any: ["ld.32.gd {T}, 0(a7)", "addi a7, a7, 4", "gjr {T}, 0"]}
   JSR:
     src: addr
@@ -251,7 +259,6 @@ millicode:
   - PACK
   - UNPK
   - MOVEP
-  - CMPM
   - MULx
   - DIVx
   - BFTST
@@ -274,7 +281,6 @@ millicode:
   - CINV
   - CPUSH
   - MOVE16
-  - DBcc         # all DBcc other than DBF
   - TRAPcc
   - "MOVE to/from SR, CCR, USP"
   - "ORI/ANDI/EORI to CCR, SR"
