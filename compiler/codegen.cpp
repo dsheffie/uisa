@@ -130,23 +130,6 @@ void cleanCFG(Function *f) {
     }
     if (changed) pruneUnreachable(f);
   }
-  // split critical edges so that phi copies have a home
-  std::vector<BasicBlock *> blocks = f->blocks;
-  for (BasicBlock *p : blocks) {
-    if (p->succs.size() < 2) continue;
-    for (BasicBlock *s : std::vector<BasicBlock *>(p->succs)) {
-      if (s->preds.size() < 2) continue;
-      BasicBlock *e = f->newBlock(p->name + "_" + s->name + "_crit_edge");
-      Instr *j = new Instr(Op::Jmp);
-      j->t = s;
-      e->ins.push_back(j);
-      Instr *t = p->term();
-      if (t->t == s) t->t = e;
-      if (t->f == s) t->f = e;
-      for (BasicBlock *&b : t->targets)
-        if (b == s) b = e;
-    }
-  }
   pruneUnreachable(f);
 }
 

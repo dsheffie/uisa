@@ -219,21 +219,7 @@ void legalize(Function *f) {
     }
     b->ins = out;
   }
-  // phi constants are materialized at the end of the incoming block
-  for (BasicBlock *b : f->blocks)
-    for (Instr *i : b->ins) {
-      if (i->op != Op::Phi) continue;
-      for (size_t k = 0; k < i->a.size(); k++) {
-        if (!i->a[k].isImm()) continue;
-        BasicBlock *p = i->preds[k];
-        Instr *c = new Instr(Op::Copy);
-        c->dst = f->newReg("k");
-        c->a = {i->a[k]};
-        c->line = i->line;
-        p->ins.insert(p->ins.end() - 1, c);
-        i->a[k] = Operand::reg(c->dst);
-      }
-    }
+  // phi constants stay immediates: out of SSA writes them on the edge
   recomputeDefs(f);
   eliminateDeadCode(f);
   recomputeDefs(f);
@@ -246,6 +232,13 @@ static int weightOf(BasicBlock *b) {
   int w = 1;
   for (int d = 0; d < std::min(b->loopDepth, 4); d++) w *= 10;
   return w;
+}
+// The edge p -> s: phi copies on it run once per traversal. With several
+// successors, p's copies go in a block of their own on the edge (split at
+// emission), which is inside only the loops that hold both ends.
+static int edgeWeight(BasicBlock *p, BasicBlock *s) {
+  if (p->succs.size() < 2) return weightOf(p);
+  return weightOf(p->loopDepth < s->loopDepth ? p : s);
 }
 
 struct FnLive {
@@ -408,7 +401,7 @@ void buildAllocProblem(Program *p, AllocProblem &ap) {
         if (i->op != Op::Phi) break;
         top.insert(i->dst);
         for (size_t k = 0; k < i->a.size(); k++)
-          if (i->a[k].isReg()) ap.prefs.push_back({i->dst, i->a[k].r, weightOf(i->preds[k])});
+          if (i->a[k].isReg()) ap.prefs.push_back({i->dst, i->a[k].r, edgeWeight(i->preds[k], b)});
       }
       for (Instr *i : b->ins) {
         if (i->op != Op::Phi) break;
@@ -717,7 +710,39 @@ static void emitInstr(Emitter &E, Instr *i, Instr *next) {
   }
 }
 
+// Out of SSA, step 1: a phi's copies run on the edge from each predecessor,
+// emitted at the end of that predecessor. A predecessor with several
+// successors (a critical edge into a block with phis) gets a block of its own
+// on that edge, placed just before the phi block so it falls through.
+static void splitCriticalEdges(Function *f) {
+  for (BasicBlock *p : std::vector<BasicBlock *>(f->blocks)) {
+    if (p->succs.size() < 2) continue;
+    for (BasicBlock *s : std::vector<BasicBlock *>(p->succs)) {
+      if (s->preds.size() < 2 || s->ins.empty() || s->ins[0]->op != Op::Phi) continue;
+      BasicBlock *e = f->newBlock(p->name + "_" + s->name + "_crit_edge");
+      f->blocks.pop_back();
+      f->blocks.insert(std::find(f->blocks.begin(), f->blocks.end(), s), e);
+      Instr *j = new Instr(Op::Jmp);
+      j->t = s;
+      j->line = p->term()->line;
+      e->ins.push_back(j);
+      Instr *t = p->term();
+      if (t->t == s) t->t = e;
+      if (t->f == s) t->f = e;
+      for (BasicBlock *&b : t->targets)
+        if (b == s) b = e;
+      for (Instr *i : s->ins) {
+        if (i->op != Op::Phi) break;
+        for (BasicBlock *&q : i->preds)
+          if (q == p) q = e;
+      }
+    }
+  }
+  f->rebuildEdges();
+}
+
 static void emitFunction(Function *f, FILE *out) {
+  splitCriticalEdges(f);
   // each block's body, including the phi copies on its (unique, after edge
   // splitting) outgoing edge
   std::map<BasicBlock *, std::vector<AsmLine>> body;
@@ -734,12 +759,17 @@ static void emitFunction(Function *f, FILE *out) {
     if (b->succs.size() == 1) {
       BasicBlock *s = b->succs[0];
       std::vector<std::pair<std::string, std::string>> moves;
+      std::vector<std::pair<std::string, int32_t>> consts;   // after the moves: they read no register
       for (Instr *i : s->ins) {
         if (i->op != Op::Phi) break;
         for (size_t k = 0; k < i->preds.size(); k++)
-          if (i->preds[k] == b) moves.push_back({R(i->dst), R(i->a[k])});
+          if (i->preds[k] == b) {
+            if (i->a[k].isImm()) consts.push_back({R(i->dst), i->a[k].imm});
+            else moves.push_back({R(i->dst), R(i->a[k])});
+          }
       }
       B.parallelCopy(moves);
+      for (auto &c : consts) B.li(c.first, c.second);
     }
     line = B.curLine;
     body[b] = B.out;
