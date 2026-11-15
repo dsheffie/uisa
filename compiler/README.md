@@ -209,8 +209,11 @@ which the compiler emits itself) and `lui/auipc` is available as
   460 in 80 s, with every inner loop move removed; what remains is in the
   large outer loop bodies.
 - **Out of SSA.** Critical edges are split; phis become parallel copies on
-  the incoming edge, cycles are broken with three-xor swaps (no scratch
-  register).
+  the incoming edge. A cycle of three or more copies goes through a scratch
+  register when one is free on that edge (one the function or its callees
+  already write, so callers never keep a value there across the call): k + 1
+  moves for k copies. Two-copy cycles, and cycles with no free register, are
+  broken with three-xor swaps.
 - **Immediates and branches.** 14-bit ALU immediates (signed for `addi/slti`,
   zero-extended for `andi/ori/xori`), 12-bit memory displacements, 11-bit
   compare-and-branch displacements: a branch that does not reach becomes the

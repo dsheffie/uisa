@@ -549,11 +549,17 @@ class Emitter {
     text("lui " + d + ", " + std::to_string(u >> LUI_SHIFT));
     if (lo) text("ori " + d + ", " + d + ", " + std::to_string(lo));
   }
-  // Sequentialize a parallel copy {dst <- src}. Cycles are broken with
-  // xor swaps, so no scratch register is needed.
-  void parallelCopy(std::vector<std::pair<std::string, std::string>> moves) {
-    moves.erase(std::remove_if(moves.begin(), moves.end(), [](auto &m) { return m.first == m.second; }),
-                moves.end());
+  // Sequentialize a parallel copy {dst <- src}. A cycle of three or more
+  // moves goes through a free register from `temps` when there is one (k + 1
+  // moves); otherwise, and for two-move cycles, it is broken with xor swaps
+  // (three instructions per swap), which need no scratch register.
+  void parallelCopy(std::vector<std::pair<std::string, std::string>> moves,
+                    const std::vector<std::string> &temps = {}) {
+    auto dropTrivial = [&] {
+      moves.erase(std::remove_if(moves.begin(), moves.end(), [](auto &m) { return m.first == m.second; }),
+                  moves.end());
+    };
+    dropTrivial();
     while (!moves.empty()) {
       bool progress = false;
       for (size_t i = 0; i < moves.size(); i++) {
@@ -568,16 +574,28 @@ class Emitter {
         break;
       }
       if (progress) continue;
-      // every remaining destination is also a source: a cycle
+      // every remaining destination is also a source: cycles only
       std::string d = moves[0].first, s = moves[0].second;
+      size_t len = 1;
+      for (std::string c = s; c != d && len <= moves.size(); len++)
+        for (auto &m : moves)
+          if (m.first == c) {
+            c = m.second;
+            break;
+          }
+      if (len >= 3 && !temps.empty()) {
+        mov(temps[0], d);              // d's old value moves aside; d is free
+        for (auto &m : moves)
+          if (m.second == d) m.second = temps[0];
+        continue;
+      }
       text("xor " + d + ", " + d + ", " + s);
       text("xor " + s + ", " + s + ", " + d);
       text("xor " + d + ", " + d + ", " + s);
       moves.erase(moves.begin());
       for (auto &m : moves)          // old d now lives in s
         if (m.second == d) m.second = s;
-      moves.erase(std::remove_if(moves.begin(), moves.end(), [](auto &m) { return m.first == m.second; }),
-                  moves.end());
+      dropTrivial();
     }
   }
 };
@@ -741,8 +759,39 @@ static void splitCriticalEdges(Function *f) {
   f->rebuildEdges();
 }
 
+// The registers f or anything it calls may write: its values' registers.
+// Callers already keep values live across a call to f out of them, so f can
+// use one as scratch wherever it holds nothing live.
+static const std::set<int> &writtenRegs(Function *f) {
+  static std::map<Function *, std::set<int>> memo;
+  auto it = memo.find(f);
+  if (it != memo.end()) return it->second;
+  std::set<int> &w = memo[f];
+  auto add = [&](Reg *r) {
+    if (r && r->color > 0) w.insert(r->color);
+  };
+  for (Reg *r : f->params) add(r);
+  for (Reg *r : f->entryRegs) add(r);
+  for (Reg *r : f->retRegs) add(r);
+  for (Reg *r : f->clobberRegs) add(r);
+  for (BasicBlock *b : f->blocks)
+    for (Instr *i : b->ins) {
+      add(i->dst);
+      for (auto &o : i->a)
+        if (o.isReg()) add(o.r);
+    }
+  for (Function *g : f->callees)
+    if (g != f) {
+      const std::set<int> &gw = writtenRegs(g);
+      w.insert(gw.begin(), gw.end());
+    }
+  return w;
+}
+
 static void emitFunction(Function *f, FILE *out) {
   splitCriticalEdges(f);
+  FnLive live;
+  computeLiveness(f, live);
   // each block's body, including the phi copies on its (unique, after edge
   // splitting) outgoing edge
   std::map<BasicBlock *, std::vector<AsmLine>> body;
@@ -768,7 +817,27 @@ static void emitFunction(Function *f, FILE *out) {
             else moves.push_back({R(i->dst), R(i->a[k])});
           }
       }
-      B.parallelCopy(moves);
+      // scratch for copy cycles: a register f may write that holds nothing
+      // live across the edge, is no copy's source or destination, and is not
+      // read by b's terminator (registers of constant phis are fine: they are
+      // written after the copies)
+      std::set<int> busy;
+      for (Reg *r : live.liveIn[s]) busy.insert(r->color);
+      for (Instr *i : s->ins) {
+        if (i->op != Op::Phi) break;
+        for (size_t k = 0; k < i->preds.size(); k++)
+          if (i->preds[k] == b && i->a[k].isImm()) busy.erase(i->dst->color);
+      }
+      for (auto &o : b->term()->a)
+        if (o.isReg()) busy.insert(o.r->color);
+      for (auto &m : moves) {
+        busy.insert(atoi(m.first.c_str() + 1));
+        busy.insert(atoi(m.second.c_str() + 1));
+      }
+      std::vector<std::string> temps;
+      for (int r : writtenRegs(f))
+        if (!busy.count(r)) temps.push_back("x" + std::to_string(r));
+      B.parallelCopy(moves, temps);
       for (auto &c : consts) B.li(c.first, c.second);
     }
     line = B.curLine;

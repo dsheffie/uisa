@@ -9,6 +9,19 @@ u32 collatz(u32 n) {
   return steps;
 }
 
+// a three-value rotation with no register to spare: every register the
+// function writes is a copy source or destination on the back edge, so the
+// cycle is broken with xor swaps (ends once a zero reaches p)
+u32 rot3(u32 p, u32 q, u32 r) {
+  while (p != 0) {
+    u32 t = p;
+    p = q;
+    q = r;
+    r = t;
+  }
+  return q;
+}
+
 entry void t_control(void) {
   u32 a = __rdg(D0), b = __rdg(D1);
   u32 acc = 0;
@@ -56,6 +69,17 @@ entry void t_control(void) {
   __wrg(A0, p);
   __wrg(A1, q);
   __wrg(A2, r);
+  // a four-value rotation (a scratch register: five moves, not nine)
+  u32 w0 = a, w1 = b, w2 = a + b, w3 = a ^ 0x5a5a;
+  for (u32 i = 0; i < (b & 15); i++) {
+    u32 t = w0;
+    w0 = w1;
+    w1 = w2;
+    w2 = w3;
+    w3 = t;
+  }
+  __wrg(A4, w0 + 3 * w1 + 5 * w2 + 7 * w3);
+  __wrg(A5, rot3(a | 1, b, 0) + rot3(b, 0, a));
   u32 n = 0;
   while (1) {
     n++;
