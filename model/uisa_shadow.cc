@@ -602,10 +602,11 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
     m.run_movem();
     model_pc = pre.pc + ilen + m.full_extra;
   } else {
+    uint32_t bfe = (cur_op & 0xf8c0) == 0xe8c0 ? m.ext16_or_zero(2) : 0;   // before millicode reuses x2
     m.run_millicode((uint32_t)MC_ENTRY[cur_op], ilen);
     mc_insns_total += m.mc_insns;
     if ((cur_op & 0xf8c0) == 0xe8c0) {
-      uint32_t e = m.R[2] >> 16;
+      uint32_t e = bfe;
       uint32_t key = ((cur_op >> 8) & 7) << 20 | ((cur_op >> 3) & 7) << 17 | (e & 0x800 ? 1 : 0) << 16 |
                      (e & 0x20 ? 1 : 0) << 15 | ((e >> 6) & 31) << 10 | (e & 31) << 5 | ((pre.sr >> 13) & 1);
       bf_census[key].first++;
