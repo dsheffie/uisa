@@ -14,18 +14,15 @@
 ; MOVE from SR / from CCR / to CCR / to SR, and MOVE USP
 ; ---------------------------------------------------------------------------
 move_sr:
-        srli    x5, x1, 8
-        addi    x6, x0, 0x40
-        b.eq    x5, x6, from_sr
-        addi    x6, x0, 0x42
-        b.eq    x5, x6, from_ccr
-        addi    x6, x0, 0x44
-        b.eq    x5, x6, to_ccr
-        addi    x6, x0, 0x46
-        b.eq    x5, x6, to_sr
-        addi    x6, x0, 0x4e
-        b.eq    x5, x6, move_usp
+        bx      x1, 9, 3                ; opword bits 11:9
+        jal     x0, from_sr             ; 40c0
+        jal     x0, from_ccr            ; 42c0
+        jal     x0, to_ccr              ; 44c0
+        jal     x0, to_sr               ; 46c0
         brk     1
+        brk     1
+        brk     1
+        jal     x0, move_usp            ; 4e6x
 
 from_sr:
         andi    x9, gsr, 0x2000         ; privileged
@@ -194,38 +191,31 @@ movec_to:
         call    ctl_write
         jal     x0, exit
 
-; x11 = control register x9
+; x11 = control register x9. Codes 000-007 and 800-807 index a 16-way table.
 ctl_read:
-        b.eq    x9, x0, rd_sfc
-        addi    x6, x0, 1
-        b.eq    x9, x6, rd_dfc
-        addi    x6, x0, 2
-        b.eq    x9, x6, rd_cacr
-        addi    x6, x0, 3
-        b.eq    x9, x6, rd_tc
-        addi    x6, x0, 4
-        b.eq    x9, x6, rd_itt0
-        addi    x6, x0, 5
-        b.eq    x9, x6, rd_itt1
-        addi    x6, x0, 6
-        b.eq    x9, x6, rd_dtt0
-        addi    x6, x0, 7
-        b.eq    x9, x6, rd_dtt1
-        addi    x6, x0, 0x800
-        b.eq    x9, x6, rd_usp
-        addi    x6, x0, 0x801
-        b.eq    x9, x6, rd_vbr
-        addi    x6, x0, 0x803
-        b.eq    x9, x6, rd_msp
-        addi    x6, x0, 0x804
-        b.eq    x9, x6, rd_isp
-        addi    x6, x0, 0x805
-        b.eq    x9, x6, rd_mmusr
-        addi    x6, x0, 0x806
-        b.eq    x9, x6, rd_urp
-        addi    x6, x0, 0x807
-        b.eq    x9, x6, rd_srp
+        andi    x5, x9, 0x7f8
+        b.ne    x5, x0, illegal
+        srli    x5, x9, 8
+        andi    x5, x5, 8
+        andi    x6, x9, 7
+        or      x5, x5, x6
+        bx      x5, 0, 4
+        jal     x0, rd_sfc
+        jal     x0, rd_dfc
+        jal     x0, rd_cacr
+        jal     x0, rd_tc
+        jal     x0, rd_itt0
+        jal     x0, rd_itt1
+        jal     x0, rd_dtt0
+        jal     x0, rd_dtt1
+        jal     x0, rd_usp
+        jal     x0, rd_vbr
         jal     x0, illegal
+        jal     x0, rd_msp
+        jal     x0, rd_isp
+        jal     x0, rd_mmusr
+        jal     x0, rd_urp
+        jal     x0, rd_srp
 rd_sfc:
         csrr    x11, sfc
         ret
@@ -281,36 +271,29 @@ rd_srp:
 
 ; control register x9 = x11
 ctl_write:
-        b.eq    x9, x0, wr_sfc
-        addi    x6, x0, 1
-        b.eq    x9, x6, wr_dfc
-        addi    x6, x0, 2
-        b.eq    x9, x6, wr_cacr
-        addi    x6, x0, 3
-        b.eq    x9, x6, wr_tc
-        addi    x6, x0, 4
-        b.eq    x9, x6, wr_itt0
-        addi    x6, x0, 5
-        b.eq    x9, x6, wr_itt1
-        addi    x6, x0, 6
-        b.eq    x9, x6, wr_dtt0
-        addi    x6, x0, 7
-        b.eq    x9, x6, wr_dtt1
-        addi    x6, x0, 0x800
-        b.eq    x9, x6, wr_usp
-        addi    x6, x0, 0x801
-        b.eq    x9, x6, wr_vbr
-        addi    x6, x0, 0x803
-        b.eq    x9, x6, wr_msp
-        addi    x6, x0, 0x804
-        b.eq    x9, x6, wr_isp
-        addi    x6, x0, 0x805
-        b.eq    x9, x6, wr_mmusr
-        addi    x6, x0, 0x806
-        b.eq    x9, x6, wr_urp
-        addi    x6, x0, 0x807
-        b.eq    x9, x6, wr_srp
+        andi    x5, x9, 0x7f8
+        b.ne    x5, x0, illegal
+        srli    x5, x9, 8
+        andi    x5, x5, 8
+        andi    x6, x9, 7
+        or      x5, x5, x6
+        bx      x5, 0, 4
+        jal     x0, wr_sfc
+        jal     x0, wr_dfc
+        jal     x0, wr_cacr
+        jal     x0, wr_tc
+        jal     x0, wr_itt0
+        jal     x0, wr_itt1
+        jal     x0, wr_dtt0
+        jal     x0, wr_dtt1
+        jal     x0, wr_usp
+        jal     x0, wr_vbr
         jal     x0, illegal
+        jal     x0, wr_msp
+        jal     x0, wr_isp
+        jal     x0, wr_mmusr
+        jal     x0, wr_urp
+        jal     x0, wr_srp
 wr_sfc:
         csrw    sfc, x11
         ret

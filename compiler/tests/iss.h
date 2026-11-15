@@ -58,7 +58,6 @@ struct Machine {
 #define GDATA 1
 #define MMU_FLUSH(addr, how) ((void)(addr))
 #define CACHE_OP(addr, how, push) ((void)(addr))
-#define MMU_PTEST(addr, how) ((void)(addr), 0u)
     switch (d.op) {
 #include "uisa_sem.inc"
       default:
@@ -83,7 +82,9 @@ struct Machine {
       uint32_t b = o.reads_rs2 ? R[d.rs2] : d.imm;
       cur_pc = mpc;
       next_pc = mpc + 4;
-      if (o.is_load && !o.is_probe) {
+      if (o.is_probe) {
+        R[d.rd] = 1;                               // MMUSR with R set: a resident translation
+      } else if (o.is_load) {
         uint32_t v = load(a + d.imm, o.mem_bytes);
         if (o.load_signed) v = (uint32_t)SX(v, 8 * o.mem_bytes);
         R[d.rd] = v;

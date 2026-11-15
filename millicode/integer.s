@@ -26,38 +26,24 @@ dbcc:
         gexit
 
 ; x10 = nonzero if guest condition x5 holds
-cond_eval:
-        b.eq    x5, x0, cc_t
-        addi    x6, x0, 1
-        b.eq    x5, x6, cc_f
-        addi    x6, x0, 2
-        b.eq    x5, x6, cc_hi
-        addi    x6, x0, 3
-        b.eq    x5, x6, cc_ls
-        addi    x6, x0, 4
-        b.eq    x5, x6, cc_cc
-        addi    x6, x0, 5
-        b.eq    x5, x6, cc_cs
-        addi    x6, x0, 6
-        b.eq    x5, x6, cc_ne
-        addi    x6, x0, 7
-        b.eq    x5, x6, cc_eq
-        addi    x6, x0, 8
-        b.eq    x5, x6, cc_vc
-        addi    x6, x0, 9
-        b.eq    x5, x6, cc_vs
-        addi    x6, x0, 10
-        b.eq    x5, x6, cc_pl
-        addi    x6, x0, 11
-        b.eq    x5, x6, cc_mi
-        addi    x6, x0, 12
-        b.eq    x5, x6, cc_ge
-        addi    x6, x0, 13
-        b.eq    x5, x6, cc_lt
-        addi    x6, x0, 14
-        b.eq    x5, x6, cc_gt
-        s.le    x10
-        ret
+cond_eval:                              ; x10 = condition x5 (0-15) holds
+        bx      x5, 0, 4
+        jal     x0, cc_t
+        jal     x0, cc_f
+        jal     x0, cc_hi
+        jal     x0, cc_ls
+        jal     x0, cc_cc
+        jal     x0, cc_cs
+        jal     x0, cc_ne
+        jal     x0, cc_eq
+        jal     x0, cc_vc
+        jal     x0, cc_vs
+        jal     x0, cc_pl
+        jal     x0, cc_mi
+        jal     x0, cc_ge
+        jal     x0, cc_lt
+        jal     x0, cc_gt
+        jal     x0, cc_le
 cc_t:
         s.t     x10
         ret
@@ -102,6 +88,9 @@ cc_lt:
         ret
 cc_gt:
         s.gt    x10
+        ret
+cc_le:
+        s.le    x10
         ret
 
 ; ---------------------------------------------------------------------------

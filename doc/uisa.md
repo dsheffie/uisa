@@ -312,6 +312,7 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `bfextui` | BFI | BFI fn=0 | rd, rs1, off, wid | `r = BF_EXTU(a, b);` |  |
 | `bfextsi` | BFI | BFI fn=1 | rd, rs1, off, wid | `r = BF_EXTS(a, b);` |  |
 | `bfinsi` | BFI | BFI fn=2 | rd, rs1, off, wid | `r = BF_INS(OLD, a, b);` | Insert the low wid bits of rs1 into the field of rd. rd is also a source (old value), so the op reads rd and rs1. |
+| `bx` | BFI | BFI fn=3 | rs1, off, wid | `npc = pc + 4 + (((a >> BF_OFF(b)) & ((1u << BF_WID(b)) - 1u)) << 2);` | Indexed branch (n-way dispatch): take the wid-bit field of rs1 starting at bit off (counted from the LSB here, 1 <= wid <= 15) as an index into a table of one-instruction slots that follows the bx, usually jal to each case. Predicted like an indirect jump. |
 | `gexit` | S | SYS fn=0 |  |  | End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc. |
 | `gfault` | S | SYS fn=1 | imm |  | Raise guest exception vector imm8. Transfers to the exception entry point. |
 | `gfaultr` | S | SYS fn=16 | rs1 |  | Raise the guest exception whose vector is in rs1 (TRAP #n, computed vectors). |
@@ -331,7 +332,6 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `tlbflush` | S | SYS fn=9 | rs1, imm | `MMU_FLUSH(a, IMM);` | Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA. (serializes) |
 | `cpush` | S | SYS fn=10 | rs1, imm | `CACHE_OP(a, IMM, 1);` | Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1. (serializes) |
 | `cinv` | S | SYS fn=11 | rs1, imm | `CACHE_OP(a, IMM, 0);` | Invalidate without write back. Same imm encoding as cpush. (serializes) |
-| `ptest` | S | SYS fn=17 | rd, rs1, imm | `r = MMU_PTEST(a, IMM);` | 68040 PTEST, done by the hardware table walker: translate rs1 with the function code in DFC (imm bit0: 1 = PTESTW, 0 = PTESTR), checking the transparent translation registers and then the tables, load the ATC, and return the MMUSR value. Never faults. (serializes) |
 | `irqack` | S | SYS fn=12 | rd, rs1 |  | Acknowledge the interrupt at level rs1; rd = vector (autovector if none supplied). (serializes) |
 | `stop` | S | SYS fn=13 |  |  | Wait for an interrupt (68k STOP, after millicode has loaded SR). (serializes) |
 | `halt` | S | SYS fn=14 | imm |  | Stop the machine (simulation / debug). imm is a status code. (serializes) |
@@ -695,7 +695,7 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | `.h` | 0 | Physical, untranslated. Hidden memory and devices. The guest MMU can never produce these addresses. |
 | `.gd` | 1 | Guest data space: translated with the guest's current privilege (S bit); data function code. |
 | `.gp` | 2 | Guest program space: as gdata with the program function code (PC-relative operands, extension words). |
-| `.ga` | 3 | Guest alternate space: function code from SFC (loads) or DFC (stores), for MOVES. |
+| `.ga` | 3 | Guest alternate space: function code from SFC (loads) or DFC (stores and probes), for MOVES and PTEST. |
 
 | Op | Major | Kind | Bytes | Notes |
 |---|---|---|---|---|
@@ -713,8 +713,8 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | `stu.8` | STU8 | store lock-end | 1 | Unlocking store: ends the atomic sequence. |
 | `stu.16` | STU16 | store lock-end | 2 |  |
 | `stu.32` | STU32 | store lock-end | 4 |  |
-| `probe.r` | PROBER | probe | 0 | Translate for read without accessing; rd = 0 if the access would succeed, else a fault status. Never faults. |
-| `probe.w` | PROBEW | probe | 0 |  |
+| `probe.r` | PROBER | probe | 0 | Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). The access would succeed if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga. |
+| `probe.w` | PROBEW | probe | 0 | As probe.r, translating for a write. |
 | `st.8.pre` | STPRE8 | store | 1 |  |
 | `st.16.pre` | STPRE16 | store | 2 |  |
 | `st.32.pre` | STPRE32 | store | 4 |  |
@@ -728,14 +728,14 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 |---|---|---|
 | 0x00 | `vbr` | 68k vector base register. |
 | 0x01 | `sfc` | Source function code (galt loads). |
-| 0x02 | `dfc` | Destination function code (galt stores). |
+| 0x02 | `dfc` | Destination function code (galt stores and probes). |
 | 0x03 | `cacr` | 68040 cache control. |
 | 0x04 | `tc` | 68040 MMU translation control. |
 | 0x05 | `itt0` | Instruction transparent translation 0. |
 | 0x06 | `itt1` | Instruction transparent translation 1. |
 | 0x07 | `dtt0` | Data transparent translation 0. |
 | 0x08 | `dtt1` | Data transparent translation 1. |
-| 0x09 | `mmusr` | MMU status (PTEST result). |
+| 0x09 | `mmusr` | MMU status (PTEST result, from probe). |
 | 0x0a | `urp` | User root pointer. |
 | 0x0b | `srp` | Supervisor root pointer. |
 | 0x0c | `usp` | Inactive user stack pointer. |

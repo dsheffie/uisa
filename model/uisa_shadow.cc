@@ -74,6 +74,7 @@ OpStats stats[65536];
 uint64_t kind_totals[K_NUM];
 uint64_t mc_insns_total, seq_uops_total;
 uint64_t exc_counts[256];   // exceptions the model took, by vector
+uint64_t mc_prof[sizeof MC_IMAGE / sizeof MC_IMAGE[0]];   // executions per millicode word
 std::vector<std::string> details;
 const size_t MAX_DETAILS = 4000;
 int details_per_op[65536];
@@ -116,7 +117,7 @@ struct Machine {
   std::vector<uint32_t> cstack;
   bool done = false, raised = false;
   uint32_t vector = 0;
-  uint32_t oracle_mmusr = 0;   // the host's MMUSR after the instruction (PTEST result)
+  uint32_t oracle_mmusr = 0;   // the host's MMUSR after the instruction (probe result)
   uint32_t mc_insns = 0;
 
   void failf(int r, const char *fmt = nullptr, uint32_t v = 0) {
@@ -143,6 +144,13 @@ struct Machine {
     return lookup(UISA_LOG_IFETCH, gpc_insn + off, 2, v) ? v : 0;
   }
   uint32_t imm(const uisa_fuop &u) {
+    if ((u.ik & 0x7f) == IK_D8 && is_full(u.ioff)) return 0;                  // the full EA includes bd
+    if ((u.ik & 0x7f) == IK_PC8 && is_full(u.ioff)) return (uint32_t)adj(u.ioff);   // base = the extension word
+    uisa_fuop a = u;
+    a.ioff = (int8_t)adj(u.ioff);
+    return imm_at(a);
+  }
+  uint32_t imm_at(const uisa_fuop &u) {
     uint32_t v;
     switch (u.ik & 0x7f) {
     case IK_CONST: v = (uint32_t)u.imm; break;
@@ -171,31 +179,105 @@ struct Machine {
   void store(uint32_t addr, int n, uint32_t v) {
     for (int i = 0; i < n; i++) writes[addr + i] = (uint8_t)(v >> (8 * (n - 1 - i)));
   }
-  // brief-format index: Xn.W/L * scale (full format: not modelled)
+  // Index register value * scale from an index extension word
+  uint32_t index_reg(uint32_t w) {
+    uint32_t x = R[G_D + ((w & 0x8000) ? 8 : 0) + ((w >> 12) & 7)];
+    if (!(w & 0x800)) x = (uint32_t)(int32_t)(int16_t)x;
+    return x << ((w >> 9) & 3);
+  }
+  // brief-format index: Xn.W/L * scale, d8 separately (full format: see full_ea)
   uint32_t index(int off, uint32_t *d8) {
     uint32_t w = ext16(off);
     if (w & 0x100) { failf(R_FULL_EXT); return 0; }
-    uint32_t x = R[G_D + ((w & 0x8000) ? 8 : 0) + ((w >> 12) & 7)];
-    if (!(w & 0x800)) x = (uint32_t)(int32_t)(int16_t)x;
     if (d8) *d8 = (uint32_t)(int32_t)(int8_t)(w & 0xff);
-    return x << ((w >> 9) & 3);
+    return index_reg(w);
+  }
+
+  // ---- full-format extension words (68020+) --------------------------------
+  // The front end's length decoder sees a full-format word (bit 8 set), so the
+  // instruction is longer than its opword says and later extension words move.
+  // The flow's index uop expands into the full address computation: base
+  // (suppressible), base displacement, index (suppressible), and an optional
+  // memory-indirect load with outer displacement (pre- or post-indexed).
+  int full_n = 0;
+  int full_off[2];       // flow offsets (as if brief) of full-format words in this instruction
+  int full_bytes[2];     // bytes of base / outer displacement after each
+  int full_extra = 0;    // total extra length
+
+  // Bytes of displacement that follow a full-format word w, or -1 if reserved.
+  static int full_disp_bytes(uint32_t w) {
+    static const int bd_len[4] = {-1, 0, 2, 4};
+    int n = bd_len[(w >> 4) & 3];
+    int iis = w & 7, is = (w >> 6) & 1;
+    if (n < 0 || (w & 8) || iis == 4 || (is && iis > 3)) return -1;
+    static const int od_len[4] = {0, 0, 2, 4};
+    return n + od_len[iis & 3];
+  }
+  // Note an index word at flow offset `off` if it is full format; call in
+  // instruction order before the flow runs.
+  void scan_full(int off) {
+    uint32_t w;
+    if (full_n >= 2 || !lookup(UISA_LOG_IFETCH, gpc_insn + adj(off), 2, w) || !(w & 0x100)) return;
+    int n = full_disp_bytes(w);
+    if (n < 0) { failf(R_UNSUPPORTED_UOP, "reserved full-format extension word %04x", w); return; }
+    full_off[full_n] = off;
+    full_bytes[full_n++] = n;
+    full_extra += n;
+  }
+  // Extension-word offset after the length decoder's adjustment
+  int adj(int off) const {
+    int a = off;
+    for (int i = 0; i < full_n; i++)
+      if (off > full_off[i]) a += full_bytes[i];
+    return a;
+  }
+  bool is_full(int off) const {
+    for (int i = 0; i < full_n; i++)
+      if (off == full_off[i]) return true;
+    return false;
+  }
+
+  // Effective address from the full-format word at `off`; `base` is An, or the
+  // address of the extension word for PC-relative modes.
+  uint32_t full_ea(int off, uint32_t base) {
+    uint32_t w = ext16(off);
+    int p = off + 2;
+    uint32_t bd = 0, od = 0;
+    switch ((w >> 4) & 3) {
+    case 2: bd = (uint32_t)(int32_t)(int16_t)ext16(p); p += 2; break;
+    case 3: bd = ext32(p); p += 4; break;
+    }
+    if (w & 0x80) base = 0;                       // BS: base suppressed
+    uint32_t x = (w & 0x40) ? 0 : index_reg(w);   // IS: index suppressed
+    int iis = w & 7;
+    if (iis == 0) return base + bd + x;           // no memory indirection
+    switch (iis & 3) {
+    case 2: od = (uint32_t)(int32_t)(int16_t)ext16(p); break;
+    case 3: od = ext32(p); break;
+    }
+    if (iis < 4) return load(base + bd + x, 4) + od;   // pre-indexed
+    return load(base + bd, 4) + x + od;                // post-indexed
   }
 
   void step(const uisa_fuop &u) {
     if (u.op == UISA_PSEUDO_IDX) {
-      R[u.rd] = R[u.rs1] + index(u.ioff, nullptr);
+      int off = adj(u.ioff);
+      R[u.rd] = is_full(u.ioff) ? full_ea(off, R[u.rs1]) : R[u.rs1] + index(off, nullptr);
       return;
     }
     const opinfo &o = OPS[u.op];
     uint32_t immv = imm(u);
     uint32_t a = R[u.rs1];
     uint32_t b = o.reads_rs2 ? R[u.rs2] : immv;
-    if (o.is_load && !o.is_probe) {
+    if (o.is_probe) {
+      R[u.rd] = oracle_mmusr;                    // the table walker's result comes from the host
+    } else if (o.is_load) {
       uint32_t addr = a + immv, v = load(addr, o.mem_bytes);
       if (o.load_signed) v = (uint32_t)SX(v, 8 * o.mem_bytes);
       R[u.rd] = v;
     } else if (o.is_store) {
       if (u.op == UISA_GPUSHR) {
+        immv += full_extra;                        // the return address: the true length
         store(a - 4, 4, gpc_insn + immv);
         R[u.rd] = a - 4;
       } else if (o.wb == 1) {
@@ -236,12 +318,11 @@ struct Machine {
 #define CSTACK_POP() cstack_pop()
 #define GSTORE(sp, addr, n, v) store((addr), (n), (v))
 #define GDATA 1
-// No ATC or caches in the functional model: flushes have no visible effect,
-// and PTEST's table walk is the hardware walker's, so its result comes from
-// the host (the shadow checks the millicode around it, not the walk).
+// No ATC or caches in the functional model: flushes have no visible effect.
+// (probe's table walk is the hardware walker's; step() takes its result from
+// the host, so the shadow checks the millicode around it, not the walk.)
 #define MMU_FLUSH(addr, how) ((void)(addr))
 #define CACHE_OP(addr, how, push) ((void)(addr))
-#define MMU_PTEST(addr, how) ((void)(addr), oracle_mmusr)
     switch (u.op) {
 #include "uisa_sem.inc"
     default:
@@ -286,6 +367,7 @@ struct Machine {
     while (!done && fail == R_MATCH) {
       uint32_t i = (mpc - MC_BASE) / 4;
       if (i >= n_words || ++mc_insns > 10000) { failf(R_UNSUPPORTED_UOP, "millicode ran away at %08x", mpc); return; }
+      mc_prof[i]++;
       uint32_t w = MC_IMAGE[i];
       dec_t d = decode(w);
       const opinfo &o = OPS[d.op];
@@ -320,13 +402,17 @@ struct Machine {
     switch (mode) {
     case 2: return R[G_A + reg];
     case 5: return R[G_A + reg] + (uint32_t)(int32_t)(int16_t)ext16(off);
-    case 6: { uint32_t x = index(off, &d8); return R[G_A + reg] + x + d8; }
+    case 6:
+      if (ext16(off) & 0x100) { scan_full(off); return full_ea(off, R[G_A + reg]); }
+      { uint32_t x = index(off, &d8); return R[G_A + reg] + x + d8; }
     case 7:
       switch (reg) {
       case 0: return (uint32_t)(int32_t)(int16_t)ext16(off);
       case 1: return ext32(off);
       case 2: return gpc_insn + off + (uint32_t)(int32_t)(int16_t)ext16(off);
-      case 3: { uint32_t x = index(off, &d8); return gpc_insn + off + x + d8; }
+      case 3:
+        if (ext16(off) & 0x100) { scan_full(off); return full_ea(off, gpc_insn + off); }
+        { uint32_t x = index(off, &d8); return gpc_insn + off + x + d8; }
       }
     }
     failf(R_UNSUPPORTED_UOP, "movem addressing mode %u", mode);
@@ -459,11 +545,13 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   uint32_t model_pc;
   if (kind == K_PLA) {
     const uisa_fuop *u = &FLOW_UOPS[FLOW_START[cur_op]];
+    for (int k = 0; k < FLOW_LEN[cur_op]; k++)
+      if (u[k].op == UISA_PSEUDO_IDX) m.scan_full(u[k].ioff);
     for (int k = 0; k < FLOW_LEN[cur_op] && m.fail == R_MATCH; k++) m.step(u[k]);
-    model_pc = m.gnpc_set ? m.gnpc : pre.pc + ilen;
+    model_pc = m.gnpc_set ? m.gnpc : pre.pc + ilen + m.full_extra;
   } else if (kind == K_SEQUENCER) {
     m.run_movem();
-    model_pc = pre.pc + ilen;
+    model_pc = pre.pc + ilen + m.full_extra;
   } else {
     m.run_millicode((uint32_t)MC_ENTRY[cur_op], ilen);
     mc_insns_total += m.mc_insns;
@@ -611,6 +699,8 @@ void uisa_shadow_dump(void) {
     for (int r = 0; r < R_NUM; r++) fprintf(f, " %llu", (unsigned long long)s.result[r]);
     fprintf(f, "\n");
   }
+  for (size_t i = 0; i < sizeof mc_prof / sizeof mc_prof[0]; i++)
+    if (mc_prof[i]) fprintf(f, "# mcprof %zx %llu\n", i * 4, (unsigned long long)mc_prof[i]);
   fprintf(f, "# details\n");
   for (const std::string &d : details) fprintf(f, "! %s\n", d.c_str());
   fclose(f);

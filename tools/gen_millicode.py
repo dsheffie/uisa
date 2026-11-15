@@ -99,6 +99,10 @@ def main():
         o.append("static const int32_t MC_EP_%s = %d;" % (name.upper(), labels[label] - base))
     with open(os.path.join(ROOT, "build", "uisa_millicode.inc"), "w") as f:
         f.write("\n".join(o) + "\n")
+    # label map for profiles (tools/mcprof.py): byte offset, label
+    with open(os.path.join(ROOT, "build", "uisa_millicode.map"), "w") as f:
+        for name, addr in sorted(labels.items(), key=lambda kv: (kv[1], kv[0])):
+            f.write("%08x %s\n" % (addr - base, name))
     print("millicode: %d words; handlers for %s" % (len(words), ", ".join(
         "%s (%d opwords)" % kv for kv in sorted(covered.items()))))
 
