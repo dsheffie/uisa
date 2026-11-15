@@ -241,6 +241,74 @@ static int random_bfwrite(int n) {
   return bad;
 }
 
+// BFTST/BFEXTU/BFEXTS/BFFFO on Dn, (A0) and (d16,A1). Also checks that the
+// front end's second-level decode sends each case where it should: immediate
+// offset and width (and, for memory, a field within 4 bytes; never BFFFO on
+// memory) to a PLA flow, everything else to millicode.
+static int random_bfread(int n) {
+  int bad = 0;
+  const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
+  for (int i = 0; i < n; i++) {
+    int kind = kinds[rnd() % 4];
+    int mode = rnd() % 3;              // 0 Dn, 1 (A0), 2 (d16,A1)
+    int dreg = rnd() % 8, xreg = rnd() % 8, oreg = rnd() % 8, wreg = rnd() % 8;
+    uint16_t op = (uint16_t)(0xe8c0 | (kind << 8) | (mode == 0 ? dreg : mode == 1 ? 0x10 : 0x29));
+    bool dyn_o = rnd() % 4 == 0, dyn_w = rnd() % 4 == 0;
+    uint16_t ext = (uint16_t)((xreg << 12) | (dyn_o ? 0x800 | (oreg << 6) : (rnd() % 32) << 6) |
+                              (dyn_w ? 0x20 | wreg : rnd() % 32));
+    if (rnd() % 3 == 0) {   // a byte-aligned whole long
+      dyn_o = dyn_w = false;
+      ext = (uint16_t)((xreg << 12) | ((rnd() % 4) * 8) << 6);
+    }
+    int16_t d16 = (int16_t)((int)(rnd() % 64) - 32);
+    int ilen = mode == 2 ? 6 : 4;
+    uisa_m68k_state pre = st(0x2400, 0x2700 | (rnd() & 0x1f));
+    for (int r = 0; r < 8; r++) pre.r[r] = rnd_val();
+    if (dyn_o) pre.r[oreg] = mode ? (uint32_t)((int32_t)(rnd() % 200) - 100) : rnd();
+    pre.r[8] = 0x10000;
+    pre.r[9] = 0x20000;
+    pre.r[15] = 0x8000;
+    uisa_m68k_state post = pre;
+    int32_t offset = dyn_o ? (int32_t)pre.r[oreg] : (ext >> 6) & 31;
+    int width = (((dyn_w ? pre.r[wreg] : ext) - 1) & 31) + 1;
+    uint32_t old;
+    uint8_t bytes[5];
+    uint32_t addr = 0;
+    int nb = 0;
+    if (mode == 0) {
+      uint32_t v = pre.r[dreg];
+      int o = offset & 31;
+      uint32_t t = o ? (v << o) | (v >> (32 - o)) : v;
+      old = t >> (32 - width);
+    } else {
+      addr = (mode == 1 ? pre.r[8] : pre.r[9] + d16) + (offset >> 3);
+      int bo = offset & 7;
+      nb = (bo + width + 7) >> 3;
+      uint64_t v = 0;
+      for (int b = 0; b < 5; b++) { bytes[b] = (uint8_t)rnd(); v = (v << 8) | bytes[b]; }
+      old = (uint32_t)((v >> (40 - bo - width)) & ((1ull << width) - 1));
+    }
+    uint16_t ccr = pre.sr & 0x1f;
+    ref_bf_insert_flags(old, width, ccr);
+    if (kind == 1) post.r[xreg] = old;
+    if (kind == 3) post.r[xreg] = width == 32 ? old : (uint32_t)((int32_t)(old << (32 - width)) >> (32 - width));
+    if (kind == 5) post.r[xreg] = (uint32_t)offset + (old ? (uint32_t)(__builtin_clz(old) - (32 - width)) : (uint32_t)width);
+    post.sr = (post.sr & 0xff00) | ccr;
+    post.pc = 0x2400 + ilen;
+    bool fast = !dyn_o && !dyn_w && (mode == 0 || (kind != 5 && nb <= 4));
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2402, 2, ext);
+    if (mode == 2) uisa_shadow_log(UISA_LOG_IFETCH, 0x2404, 2, (uint16_t)d16);
+    for (int b = 0; b < nb; b++) uisa_shadow_log(UISA_LOG_READ, addr + b, 1, bytes[b]);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random bf read", op, ext, 0);
+    if ((uisa_shadow_kind_total(1) != pla + 1) != !fast && bad++ < 5)
+      ref_fail(fast ? "random bf read: expected a PLA flow" : "random bf read: expected millicode", op, ext, 0);
+  }
+  return bad;
+}
+
 int main() {
   uisa_shadow_init("build/test_shadow_report.txt");
   {  // MOVE.L (A0)+,D1: load, post-increment, N set
@@ -563,6 +631,7 @@ int main() {
   fails += random_divl(20000);
   fails += random_divw(20000);
   fails += random_bfwrite(20000);
+  fails += random_bfread(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;

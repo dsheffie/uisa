@@ -21,7 +21,7 @@ const uint16_t UISA_PSEUDO_IDX = 0xffff;
 struct uisa_fuop {
   uint16_t op;
   uint8_t rd, rs1, rs2;
-  uint8_t ik;      // immediate kind (IK_*), bit 7 negates
+  uint8_t ik;      // immediate kind (IK_*), bit 7 negates, bit 6 adds the bitfield byte offset
   int8_t ioff;     // extension-word offset from the instruction address
   int32_t imm;
 };
@@ -30,7 +30,9 @@ struct uisa_fuop {
 #include "uisa_millicode.inc"
 
 enum { K_ILLEGAL, K_PLA, K_SEQUENCER, K_MILLICODE, K_UNMAPPED, K_NUM };
-enum { IK_CONST, IK_D16, IK_D8, IK_ABSW, IK_ABSL, IK_IMMB, IK_IMMW, IK_IMML, IK_BRW, IK_BRL, IK_PC16, IK_PC8 };
+enum { IK_CONST, IK_D16, IK_D8, IK_ABSW, IK_ABSL, IK_IMMB, IK_IMMW, IK_IMML, IK_BRW, IK_BRL, IK_PC16, IK_PC8,
+       IK_BFB, IK_BFM1, IK_BFM2, IK_BFM3, IK_BFM4, IK_BFR, IK_BFI };
+enum { G_BFX = 60 };   // flow register: the data register in bits 14:12 of a bitfield extension word
 enum { G_D = 32, G_A = 40, G_PC = 48, G_SR = 49 };   // guest registers in the uisa namespace
 
 // Outcomes of a shadowed instruction.
@@ -72,9 +74,13 @@ int log_n;
 bool log_overflow;
 OpStats stats[65536];
 uint64_t kind_totals[K_NUM];
+uint64_t pla_uops_total;   // PLA uops issued (bitfield XSEL flows included)
 uint64_t mc_insns_total, seq_uops_total;
 uint64_t exc_counts[256];   // exceptions the model took, by vector
 uint64_t mc_prof[sizeof MC_IMAGE / sizeof MC_IMAGE[0]];   // executions per millicode word
+// bitfield census: key = op(3) mode(3) Do Dw off(5) wid(5) super; value = count, mc insns
+std::map<uint32_t, std::pair<uint64_t, uint64_t>> bf_census;
+std::map<uint32_t, uint64_t> bf_pcs;
 std::vector<std::string> details;
 const size_t MAX_DETAILS = 4000;
 int details_per_op[65536];
@@ -144,15 +150,22 @@ struct Machine {
     return lookup(UISA_LOG_IFETCH, gpc_insn + off, 2, v) ? v : 0;
   }
   uint32_t imm(const uisa_fuop &u) {
-    if ((u.ik & 0x7f) == IK_D8 && is_full(u.ioff)) return 0;                  // the full EA includes bd
-    if ((u.ik & 0x7f) == IK_PC8 && is_full(u.ioff)) return (uint32_t)adj(u.ioff);   // base = the extension word
-    uisa_fuop a = u;
-    a.ioff = (int8_t)adj(u.ioff);
-    return imm_at(a);
+    int k = u.ik & 0x3f;
+    if (k == IK_CONST) return (uint32_t)u.imm;
+    uint32_t v;
+    if (k == IK_D8 && is_full(u.ioff)) v = 0;                                   // the full EA includes bd
+    else if (k == IK_PC8 && is_full(u.ioff)) v = (uint32_t)adj(u.ioff);          // base = the extension word
+    else {
+      uisa_fuop a = u;
+      a.ioff = (int8_t)adj(u.ioff);
+      v = imm_at(a);
+    }
+    if (u.ik & 0x40) v += (ext16(2) >> 9) & 3;     // + bitfield offset / 8
+    return v + (uint32_t)u.imm;
   }
   uint32_t imm_at(const uisa_fuop &u) {
     uint32_t v;
-    switch (u.ik & 0x7f) {
+    switch (u.ik & 0x3f) {
     case IK_CONST: v = (uint32_t)u.imm; break;
     case IK_D16: case IK_ABSW: case IK_IMMW: v = (uint32_t)(int32_t)(int16_t)ext16(u.ioff); break;
     case IK_D8: v = (uint32_t)(int32_t)(int8_t)(ext16(u.ioff) & 0xff); break;
@@ -162,6 +175,14 @@ struct Machine {
     case IK_BRL: v = 2 + ext32(u.ioff); break;
     case IK_PC16: v = u.ioff + (uint32_t)(int32_t)(int16_t)ext16(u.ioff); break;
     case IK_PC8: v = u.ioff + (uint32_t)(int32_t)(int8_t)(ext16(u.ioff) & 0xff); break;
+    case IK_BFB: v = (ext16(u.ioff) >> 9) & 3; break;
+    case IK_BFM1: case IK_BFM2: case IK_BFM3: case IK_BFM4: {
+      uint32_t e = ext16(u.ioff), n = (u.ik & 0x3f) - IK_BFM1 + 1;
+      v = BF_PACK(32 - 8 * n + ((e >> 6) & 7), e & 31);
+      break;
+    }
+    case IK_BFR: { uint32_t e = ext16(u.ioff); v = BF_PACK((e >> 6) & 31, e & 31); break; }
+    case IK_BFI: { uint32_t w = ext16(u.ioff) & 31; v = BF_PACK(32 - (w ? w : 32), w); break; }
     default: failf(R_UNSUPPORTED_UOP); v = 0; break;
     }
     return (u.ik & 0x80) ? (uint32_t)(0u - v) : v;
@@ -532,6 +553,27 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   if (!pending) return;
   pending = false;
   int kind = FLOW_KIND[cur_op];
+  const uisa_fuop *flow = &FLOW_UOPS[FLOW_START[cur_op]];
+  int flow_len = FLOW_LEN[cur_op];
+  uint32_t bfx = 0;
+  if (XSEL_INDEX[cur_op] >= 0) {
+    // second-level decode: a bitfield with immediate offset and width runs
+    // one of the opword's XSEL flows, chosen by the bytes the field touches
+    uint32_t e;
+    if (lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) && !(e & 0x820)) {
+      uint32_t o = (e >> 6) & 31, w = (e & 31) ? (e & 31) : 32, n = ((o & 7) + w + 7) >> 3;
+      int v;
+      if ((cur_op & 0x38) == 0) v = (o == 0 && w == 32) ? 4 : 0;
+      else v = (w == 32 && (o & 7) == 0) ? 4 : n <= 4 ? (int)n - 1 : -1;
+      if (v >= 0) {
+        int x = XSEL_INDEX[cur_op] * 5 + v;
+        flow = &FLOW_UOPS[XSEL_START[x]];
+        flow_len = XSEL_LEN[x];
+        kind = K_PLA;
+        bfx = G_D + ((e >> 12) & 7);
+      }
+    }
+  }
   kind_totals[kind]++;
   stats[cur_op].kind_count++;
   if (log_overflow) return;
@@ -544,10 +586,17 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   int ilen = FLOW_ILEN[cur_op];
   uint32_t model_pc;
   if (kind == K_PLA) {
-    const uisa_fuop *u = &FLOW_UOPS[FLOW_START[cur_op]];
-    for (int k = 0; k < FLOW_LEN[cur_op]; k++)
+    const uisa_fuop *u = flow;
+    pla_uops_total += flow_len;
+    for (int k = 0; k < flow_len; k++)
       if (u[k].op == UISA_PSEUDO_IDX) m.scan_full(u[k].ioff);
-    for (int k = 0; k < FLOW_LEN[cur_op] && m.fail == R_MATCH; k++) m.step(u[k]);
+    for (int k = 0; k < flow_len && m.fail == R_MATCH; k++) {
+      uisa_fuop x = u[k];
+      if (x.rd == G_BFX) x.rd = (uint8_t)bfx;     // the front end's register substitution
+      if (x.rs1 == G_BFX) x.rs1 = (uint8_t)bfx;
+      if (x.rs2 == G_BFX) x.rs2 = (uint8_t)bfx;
+      m.step(x);
+    }
     model_pc = m.gnpc_set ? m.gnpc : pre.pc + ilen + m.full_extra;
   } else if (kind == K_SEQUENCER) {
     m.run_movem();
@@ -555,6 +604,14 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   } else {
     m.run_millicode((uint32_t)MC_ENTRY[cur_op], ilen);
     mc_insns_total += m.mc_insns;
+    if ((cur_op & 0xf8c0) == 0xe8c0) {
+      uint32_t e = m.R[2] >> 16;
+      uint32_t key = ((cur_op >> 8) & 7) << 20 | ((cur_op >> 3) & 7) << 17 | (e & 0x800 ? 1 : 0) << 16 |
+                     (e & 0x20 ? 1 : 0) << 15 | ((e >> 6) & 31) << 10 | (e & 31) << 5 | ((pre.sr >> 13) & 1);
+      bf_census[key].first++;
+      bf_census[key].second += m.mc_insns;
+      bf_pcs[pre.pc]++;
+    }
     model_pc = m.R[G_PC];
   }
   if (m.fail != R_MATCH) { note(m.fail, m, *post, model_pc); return; }
@@ -563,6 +620,7 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
 }
 
 uint64_t uisa_shadow_count(uint16_t opword, int result) { return stats[opword].result[result]; }
+uint64_t uisa_shadow_kind_total(int kind) { return kind >= 0 && kind < K_NUM ? kind_totals[kind] : 0; }
 uint64_t uisa_shadow_exc_count(int vector, int result) { return exc_stats[vector & 0xff].result[result]; }
 
 void uisa_shadow_exc_pre(int vector, int level, const uisa_m68k_state *s, const uisa_fault *f) {
@@ -679,6 +737,10 @@ void uisa_shadow_dump(void) {
   for (int k = 0; k < K_NUM; k++) fprintf(f, " %s=%llu", kn[k], (unsigned long long)kind_totals[k]);
   fprintf(f, "\n# millicode instructions executed: %llu; sequencer uops: %llu\n",
           (unsigned long long)mc_insns_total, (unsigned long long)seq_uops_total);
+  uint64_t all_insns = kind_totals[K_PLA] + kind_totals[K_SEQUENCER] + kind_totals[K_MILLICODE];
+  uint64_t all_uops = pla_uops_total + seq_uops_total + mc_insns_total;
+  fprintf(f, "# pla uops: %llu; uops per instruction: %.3f\n", (unsigned long long)pla_uops_total,
+          all_insns ? (double)all_uops / all_insns : 0.0);
   fprintf(f, "# exceptions taken by vector:");
   for (int v = 0; v < 256; v++)
     if (exc_counts[v]) fprintf(f, " %d=%llu", v, (unsigned long long)exc_counts[v]);
@@ -701,6 +763,9 @@ void uisa_shadow_dump(void) {
   }
   for (size_t i = 0; i < sizeof mc_prof / sizeof mc_prof[0]; i++)
     if (mc_prof[i]) fprintf(f, "# mcprof %zx %llu\n", i * 4, (unsigned long long)mc_prof[i]);
+  for (auto &kv : bf_census)
+    fprintf(f, "# bf %x %llu %llu\n", kv.first, (unsigned long long)kv.second.first, (unsigned long long)kv.second.second);
+  for (auto &kv : bf_pcs) if (kv.second >= 1000) fprintf(f, "# bfpc %08x %llu\n", kv.first, (unsigned long long)kv.second);
   fprintf(f, "# details\n");
   for (const std::string &d : details) fprintf(f, "! %s\n", d.c_str());
   fclose(f);

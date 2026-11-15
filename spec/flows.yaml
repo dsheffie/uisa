@@ -278,5 +278,50 @@ millicode:
   - "MOVE to/from SR, CCR, USP"
   - "ORI/ANDI/EORI to CCR, SR"
 
+# Bitfield instructions: a second-level decode on the bitfield extension
+# word (always at offset 2). When the offset and width are both immediates
+# (Do = Dw = 0) and, for a memory operand, the field lies within 4 bytes, the
+# front end issues one of these flows instead of entering millicode. For
+# memory it picks the flow by the number of bytes the field touches,
+# n = ((offset & 7) + width + 7) / 8, and reads and writes exactly those bytes.
+# Everything else (register offset or width, a 5-byte field, BFFFO on memory)
+# stays in millicode.
+#
+# Values the front end takes from the extension word:
+#   {bf}   packed field descriptor for bfextui/bfextsi/bfinsi: for a register,
+#          (offset, width); for memory, the field's position within the
+#          n-byte value loaded, (32 - 8n + (offset & 7), width)
+#   {bfi}  descriptor of the low `width` bits of a register (BFINS flags)
+#   {Dx}   the data register in bits 14:12
+#   {disp} the EA displacement plus offset / 8 (whole bytes into the field)
+# {V} is the field's container (Dn, or the temp holding the loaded bytes),
+# {F} the field sign-extended (flags: mov.32 x0, F gives N and Z, clears V, C),
+# {T} scratch.
+#
+# A fifth flow, `long`, is used when the field is a whole long at a byte
+# boundary (width 32, offset a multiple of 8; for a register, offset 0): the
+# operand itself is the field, so BFEXTU/BFEXTS are MOVE.L and BFTST is TST.L.
+# Ops without a `long` body use their 4-byte (or register) flow.
+bitfield:
+  load:
+    1: ["ld.8u.gd {V}, {disp}({base})"]
+    2: ["ld.16u.gd {V}, {disp}({base})"]
+    3: ["ld.16u.gd {V}, {disp}({base})", "ld.8u.gd {T}, {disp2}({base})", "slli {V}, {V}, 8", "or {V}, {V}, {T}"]
+    4: ["ld.32.gd {V}, {disp}({base})"]
+  store:
+    1: ["st.8.gd {V}, {disp}({base})"]
+    2: ["st.16.gd {V}, {disp}({base})"]
+    3: ["srli {T}, {V}, 8", "st.16.gd {T}, {disp}({base})", "st.8.gd {V}, {disp2}({base})"]
+    4: ["st.32.gd {V}, {disp}({base})"]
+  ops:
+    BFTST:  {body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}"], long: ["mov.32 x0, {V}"]}
+    BFEXTU: {body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "bfextui {Dx}, {V}, {bf}"], long: ["mov.32 {Dx}, {V}"]}
+    BFEXTS: {body: ["bfextsi {Dx}, {V}, {bf}", "mov.32 {Dx}, {Dx}"], long: ["mov.32 {Dx}, {V}"]}
+    BFFFO:  {reg_only: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "addi {T}, x0, {bfd}", "bfffo {Dx}, {V}, {T}"]}
+    BFCLR:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "bfinsi {V}, x0, {bf}"]}
+    BFSET:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "addi {F}, x0, -1", "bfinsi {V}, {F}, {bf}"]}
+    BFCHG:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "orn {F}, x0, {F}", "bfinsi {V}, {F}, {bf}"]}
+    BFINS:  {write: true, body: ["bfextsi {F}, {Dx}, {bfi}", "mov.32 x0, {F}", "bfinsi {V}, {Dx}, {bf}"]}
+
 params:
   movem_regs: 5   # assumed registers per MOVEM for the uop estimate

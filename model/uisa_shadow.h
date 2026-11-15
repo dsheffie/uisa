@@ -57,6 +57,8 @@ uint64_t uisa_shadow_exc_count(int vector, int result);
 /* For tests: how many times `opword` produced `result` (0 = match, 1 = reg
  * mismatch, ... in the order of the report columns). */
 uint64_t uisa_shadow_count(uint16_t opword, int result);
+/* Instructions run by flow kind (0 illegal, 1 PLA, 2 sequencer, 3 millicode, 4 unmapped). */
+uint64_t uisa_shadow_kind_total(int kind);
 
 #ifdef __cplusplus
 }

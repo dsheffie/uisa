@@ -14,6 +14,18 @@ offset of the extension word from the instruction's address:
   {br.W@k} {br.L@k}                      branch displacement + 2 (relative to the instruction)
   {pc16@k} {pc8@k}                       PC-relative: k + displacement (16-bit, or the brief format's 8-bit)
   {xn@k}                                 index register named by a brief extension word
+
+Bitfield flows (selected by a second-level decode of the bitfield extension
+word, see `bitfield:` in flows.yaml) also use:
+
+  {bfb@k}                                offset / 8 from the bitfield extension word
+  {bfm1@k}..{bfm4@k} {bfr@k} {bfi@k}     packed field descriptors (memory n bytes,
+                                         register, low bits of a register)
+  {bfw@k}                                the width operand of a BFI-format op; the
+                                         descriptor before it already carries it
+  {dx@k}                                 the data register in bits 14:12
+  {kind@k|bf}                            the reference plus offset / 8
+  ...+N                                  any reference plus a constant
 """
 
 import argparse
@@ -33,8 +45,13 @@ FLOWS_PATH = os.path.join(HERE, "..", "spec", "flows.yaml")
 CC_NAMES = [c.lower() for c in m68kdec.CC]
 SIZE_BITS = {"B": 8, "W": 16, "L": 32}
 SAMPLE = {"d16": "8", "d8": "4", "abs.W": "64", "abs.L": "64", "imm.B": "5", "imm.W": "5",
-          "imm.L": "5", "br.W": "6", "br.L": "6", "pc16": "6", "pc8": "6", "xn": "d1"}
-RUNTIME = re.compile(r"\{([A-Za-z0-9.]+)@(\d+)\}")
+          "imm.L": "5", "br.W": "6", "br.L": "6", "pc16": "6", "pc8": "6", "xn": "d1",
+          "bfb": "0", "bfm1": "8", "bfm2": "8", "bfm3": "8", "bfm4": "8", "bfr": "8", "bfi": "8",
+          "bfw": "8", "dx": "d1"}
+RUNTIME = re.compile(r"\{([A-Za-z0-9.]+)@(\d+)(?:\|bf)?\}(?:\+\d+)?")
+BF_OPS = ["BFTST", "BFEXTU", "BFCHG", "BFEXTS", "BFCLR", "BFFFO", "BFSET", "BFINS"]
+BF_MODES = {2: "(An)", 5: "(d16,An)", 6: "(d8,An,Xn)"}
+BF_MODE7 = {0: "abs.W", 1: "abs.L", 2: "(d16,PC)", 3: "(d8,PC,Xn)"}
 
 
 class Flow:
@@ -298,6 +315,53 @@ class Expander:
         uops = self.peephole(uops)
         return Flow("pla", uops)
 
+    # --- bitfields: second-level decode on the extension word ---------------
+    def bf_variants(self, op):
+        """Flows for a bitfield opword with immediate offset and width, keyed by
+        n = bytes the field touches (1-4), plus "long" (a whole long at a byte
+        boundary); a register operand has one flow, returned for every n.
+        None if the opword always uses millicode."""
+        if op & 0xF8C0 != 0xE8C0:
+            return None
+        name = BF_OPS[(op >> 8) & 7]
+        spec = self.f["bitfield"]["ops"][name]
+        mode, r = (op >> 3) & 7, op & 7
+        write = spec.get("write", False)
+        t = self.t
+        b = {"{F}": t["t1"], "{T}": t["t4"], "{Dx}": "{dx@2}", "{bfi}": "{bfi@2}, {bfw@2}"}
+        if mode == 0:
+            b.update({"{V}": "d%d" % r, "{bf}": "{bfr@2}, {bfw@2}", "{bfd}": "{bfr@2}"})
+            fl = Flow("pla", self.peephole([self.subst(x, b) for x in spec["body"]]))
+            out = {n: fl for n in (1, 2, 3, 4)}
+            out["long"] = Flow("pla", [self.subst(x, b) for x in spec["long"]]) if "long" in spec else fl
+            return out
+        if spec.get("reg_only"):
+            return None
+        mname = BF_MODES.get(mode) or (BF_MODE7.get(r) if mode == 7 else None)
+        if mname is None or (write and "PC" in mname):
+            return None
+        pre, _, base, disp, _, _ = self.fragment("dst", (mname, r), "L", t["t2"], t["t3"], 4)
+        m = RUNTIME.match(disp)
+        disp = "{bfb@2}" if disp == "0" else disp[:-1] + "|bf}"
+        out = {}
+        for n in (1, 2, 3, 4):
+            b2 = dict(b, **{"{V}": t["t0"], "{bf}": "{bfm%d@2}, {bfw@2}" % n, "{base}": base,
+                            "{disp}": disp, "{disp2}": disp + "+2"})
+            lines = list(pre) + self.f["bitfield"]["load"][n] + spec["body"]
+            if write:
+                lines += self.f["bitfield"]["store"][n]
+            out[n] = Flow("pla", self.peephole([self.subst(x, b2) for x in lines]))
+            if n == 4:
+                body = spec.get("long")
+                out["long"] = Flow("pla", self.peephole([self.subst(x, b2) for x in list(pre) + self.f["bitfield"]["load"][4] + body])) if body else out[4]
+        return out
+
+    @staticmethod
+    def subst(line, b):
+        for k, v in b.items():
+            line = line.replace(k, v)
+        return line
+
     @staticmethod
     def load(size, dst, base, disp):
         return "%s.gd %s, %s(%s)" % ({"B": "ld.8u", "W": "ld.16u", "L": "ld.32"}[size], dst, disp, base)
@@ -352,6 +416,16 @@ def cmd_show(a):
             print("        " + u)
         for e in check(spec, fl) if fl.kind == "pla" else []:
             print("   !! " + e)
+        vs = ex.bf_variants(op) or {}
+        for n, v in vs.items():
+            if n in (2, 3, 4) and v is vs[1] or (n == "long" and v is vs[1 if op & 0x38 == 0 else 4]):
+                continue
+            what = "whole long" if n == "long" else ("register" if op & 0x38 == 0 else "field in %d byte%s" % (n, "s" if n > 1 else ""))
+            print("      immediate offset/width, %s: %d uops" % (what, v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
 
 
 def cmd_check(a):
@@ -360,8 +434,10 @@ def cmd_check(a):
     for op in range(65536):
         fl = ex.expand(op)
         kinds[fl.kind] += 1
-        if fl.kind == "pla":
-            e = check(spec, fl)
+        e = check(spec, fl) if fl.kind == "pla" else []
+        for v in (ex.bf_variants(op) or {}).values():
+            e += check(spec, v)
+        if True:
             if e:
                 form = m68kdec.decode(op).form()
                 bad[form] += 1
