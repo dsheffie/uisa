@@ -279,16 +279,17 @@ struct opinfo {
 
     # guest-op semantics
     g = ["", "namespace uisa {", "",
-         "struct gop_out { uint32_t r; bool N, Z, V, C, X; };", "",
+         "/* T: a trap vector the uop raises once its instruction retires (0 = none) */",
+         "struct gop_out { uint32_t r; bool N, Z, V, C, X; unsigned T; };", "",
          "/* Evaluate guest-op family `fn` at width n. Flags the family does not write keep",
          " * their incoming values. The caller applies the form (gop_writeback) and",
          " * commits flags only when the variant's flags_on is set. */",
          "static inline gop_out gop_eval(unsigned fn, unsigned n, uint32_t a, uint32_t b,",
          "                               bool xin, bool nin, bool zin, bool vin, bool cin) {",
-         "  gop_out o = {0, nin, zin, vin, cin, xin};",
+         "  gop_out o = {0, nin, zin, vin, cin, xin, 0};",
          "  uint32_t m = MSK(n); (void)m;",
-         "  uint32_t &r = o.r; bool &N = o.N, &Z = o.Z, &V = o.V, &C = o.C, &X = o.X;",
-         "  (void)N; (void)Z; (void)V; (void)C; (void)X;",
+         "  uint32_t &r = o.r; bool &N = o.N, &Z = o.Z, &V = o.V, &C = o.C, &X = o.X; unsigned &T = o.T;",
+         "  (void)N; (void)Z; (void)V; (void)C; (void)X; (void)T;",
          "  switch (fn) {"]
     for op in spec.d["guest_ops"]:
         g.append("  case %d: { // %s" % (op["fn"], op["name"]))
@@ -470,7 +471,8 @@ def gen_doc(spec):
     out.append("| Family | fn | Kind | Sizes | imm | Reads | Writes | Notes |")
     out.append("|---|---|---|---|---|---|---|---|")
     for op in d["guest_ops"]:
-        notes = " ".join(x for x in (op.get("desc", ""), ("Precondition: " + op["precondition"]) if op.get("precondition") else "") if x)
+        notes = " ".join(x for x in (op.get("desc", ""), ("Precondition: " + op["precondition"]) if op.get("precondition") else "",
+                                     ("Trap: " + op["trap"]) if op.get("trap") else "") if x)
         out.append("| `%s` | %d | %s | %s | %s | %s | %s | %s |" % (
             op["name"], op["fn"], op["kind"], ",".join(str(s) for s in op.get("sizes", [8, 16, 32])),
             "yes" if op.get("imm") else "", " ".join(op.get("reads", [])) or "-",
@@ -479,7 +481,10 @@ def gen_doc(spec):
     out.append("### Guest-op semantics")
     out.append("")
     out.append("C reference semantics, exactly as compiled into the generated ISS header. "
-               "`n` = operand width, `m` = MSK(n), `xin`..`cin` = incoming flags.")
+               "`n` = operand width, `m` = MSK(n), `xin`..`cin` = incoming flags. "
+               "Setting `T` to a vector flags a trap: the uop's instruction retires (its other results, such as an "
+               "address-register update, stand) and the exception is then taken with the next PC stacked, as the "
+               "68k does for a zero divide.")
     out.append("")
     for op in d["guest_ops"]:
         out.append("**`%s`**" % op["name"])

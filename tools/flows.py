@@ -390,28 +390,47 @@ class Expander:
             return [fl("imm"), fl("imm_user")]
         return None
 
-    def mull_variants(self, op):
-        """MULU.L/MULS.L flows indexed by extension bits 11:10 (u32, u64, s32, s64)."""
-        if op & 0xFFC0 != 0x4C00:
-            return None
+    def long_src(self, op):
+        """(uops, S) loading the 32-bit source of a MULx.L/DIVx.L opword, whose
+        operand extension words follow the extension word at offset 4; None
+        for an invalid source."""
         src = (m68kdec.decode(op).src, op & 7)
         if src[0] is None or src[0] == "An":
             return None
         t = self.t
-        pre = []
         if src[0] == "#imm":
-            S = t["t0"]
-            pre = ["addi %s, x0, {imm.L@4}" % S]
-        else:
-            fpre, val, base, disp, post, mem = self.fragment("src", src, "L", t["t2"], t["t3"], 4)
-            if mem:
-                S = t["t0"]
-                pre = fpre + [self.load("L", S, base, disp)] + post
-            else:
-                S = val
+            return ["addi %s, x0, {imm.L@4}" % t["t0"]], t["t0"]
+        fpre, val, base, disp, post, mem = self.fragment("src", src, "L", t["t2"], t["t3"], 4)
+        if mem:
+            return fpre + [self.load("L", t["t0"], base, disp)] + post, t["t0"]
+        return [], val
+
+    def mull_variants(self, op):
+        """MULU.L/MULS.L flows indexed by extension bits 11:10 (u32, u64, s32, s64)."""
+        if op & 0xFFC0 != 0x4C00:
+            return None
+        ls = self.long_src(op)
+        if not ls:
+            return None
+        pre, S = ls
         b = {"{Dl}": "{dx@2}", "{Dh}": "{dh@2}", "{S}": S}
         m = self.f["mull"]
         return [Flow("pla", self.peephole(pre + [self.subst(x, b) for x in m[k]])) for k in ("u32", "u64", "s32", "s64")]
+
+    def divl_variants(self, op):
+        """DIVU.L/DIVS.L flows indexed by extension bits 11:10 (signed, 64-bit
+        dividend) plus 4 when Dr = Dq; None entries (64-bit dividend) use millicode."""
+        if op & 0xFFC0 != 0x4C40:
+            return None
+        ls = self.long_src(op)
+        if not ls:
+            return None
+        pre, S = ls
+        b = {"{Dq}": "{dx@2}", "{Dr}": "{dh@2}", "{S}": S}
+        d = self.f["divl"]
+        def fl(k):
+            return Flow("pla", self.peephole(pre + [self.subst(x, b) for x in d[k]]))
+        return [fl("u32"), None, fl("s32"), None, fl("u32q"), None, fl("s32q"), None]
 
     def xsel_variants(self, op):
         """Second-level-decode flows of an opword as a list indexed by variant
@@ -422,7 +441,7 @@ class Expander:
         mv = self.movec_variants(op)
         if mv:
             return [mv[k] for k in range(16)]
-        return self.sr_variants(op) or self.mull_variants(op)
+        return self.sr_variants(op) or self.mull_variants(op) or self.divl_variants(op)
 
     @staticmethod
     def subst(line, b):
@@ -500,6 +519,13 @@ def cmd_show(a):
                 print("          " + u)
             for e in check(spec, v):
                 print("   !! " + e)
+        for n, v in enumerate(ex.divl_variants(op) or []):
+            if v:
+                print("      %s 32-bit dividend%s: %d uops" % ("signed" if n & 2 else "unsigned", ", quotient only" if n & 4 else "", v.count))
+                for u in v.uops:
+                    print("          " + u)
+                for e in check(spec, v):
+                    print("   !! " + e)
         for n, v in enumerate(ex.sr_variants(op) or []):
             what = ("; new S = 1", "; new S = 0")[n] if op == 0x46FC else ""
             print("      S = 1, M = 0%s: %d uops" % (what, v.count))

@@ -145,6 +145,9 @@ ops:
     any: ["st.32.pre.gd {EA}, -4(a7)"]
   MULU: {src: read, dst: rmw, any: ["mulu.16 {D}, {D}, {S}"]}
   MULS: {src: read, dst: rmw, any: ["muls.16 {D}, {D}, {S}"]}
+  # a zero divisor leaves Dn alone and traps (vector 5) after the instruction
+  DIVU: {src: read, dst: rmw, any: ["divu.16 {D}, {S}"]}
+  DIVS: {src: read, dst: rmw, any: ["divs.16 {D}, {S}"]}
   EXT:
     dst: rmw
     reg32: ["ext.32 {D}, {D}"]
@@ -249,8 +252,6 @@ millicode:
   - UNPK
   - MOVEP
   - CMPM
-  - DIVU
-  - DIVS
   - MULx
   - DIVx
   - BFTST
@@ -369,6 +370,24 @@ mull:
         "add {Dl}, x29, x0", "add {Dh}, x31, x0"]
   s64: ["mul x29, {Dl}, {S}", "mulh x31, {Dl}, {S}", "sltu x27, x0, x29", "or x27, x31, x27", "mov.32 x0, x27",
         "add {Dl}, x29, x0", "add {Dh}, x31, x0"]
+
+# DIVU.L / DIVS.L <ea>,Dq and <ea>,Dr:Dq with a 32-bit dividend (extension
+# bit 10 clear; the 64-bit dividend stays in millicode). The front end picks
+# by bit 11 (signed) and whether Dr = Dq (quotient only), and substitutes
+# {Dq} (bits 14:12) and {Dr} (bits 2:0). A zero divisor makes the guest divide
+# leave its destination alone and flag the zero-divide trap, taken once the
+# instruction retires (so an (An)+ or -(An) update stands); DIVS.L overflow
+# (0x80000000 / -1) leaves it alone with V set. The base remainder ops do not
+# know either case, so Dr is selected branch-free: it keeps its old value when
+# k = 0, where k is the divisor, or (signed) zero on overflow too.
+divl:
+  u32: ["add x29, {Dq}, x0", "divu.32 x29, {S}", "remu x31, {Dq}, {S}", "czeqz x31, x31, {S}",
+        "cznez x27, {Dr}, {S}", "or {Dr}, x31, x27", "add {Dq}, x29, x0"]
+  s32: ["add x29, {Dq}, x0", "divs.32 x29, {S}", "rem x31, {Dq}, {S}", "addi x27, {S}, 1",
+        "xori x30, {Dq}, -0x80000000", "or x27, x27, x30", "czeqz x27, {S}, x27", "czeqz x31, x31, x27",
+        "cznez x27, {Dr}, x27", "or {Dr}, x31, x27", "add {Dq}, x29, x0"]
+  u32q: ["divu.32 {Dq}, {S}"]
+  s32q: ["divs.32 {Dq}, {S}"]
 
 params:
   movem_regs: 5   # assumed registers per MOVEM for the uop estimate

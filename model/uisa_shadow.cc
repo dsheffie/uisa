@@ -33,7 +33,7 @@ enum { K_ILLEGAL, K_PLA, K_SEQUENCER, K_MILLICODE, K_UNMAPPED, K_NUM };
 enum { IK_CONST, IK_D16, IK_D8, IK_ABSW, IK_ABSL, IK_IMMB, IK_IMMW, IK_IMML, IK_BRW, IK_BRL, IK_PC16, IK_PC8,
        IK_BFB, IK_BFM1, IK_BFM2, IK_BFM3, IK_BFM4, IK_BFR, IK_BFI };
 enum { G_XREG = 60,      // flow register: the register named by the extension word (bitfield Dx, MOVEC Rn, MULx.L Dl)
-       G_XREG2 = 61 };    // MULx.L Dh (extension bits 2:0)
+       G_XREG2 = 61 };    // MULx.L Dh, DIVx.L Dr (extension bits 2:0)
 enum { G_D = 32, G_A = 40, G_PC = 48, G_SR = 49 };   // guest registers in the uisa namespace
 
 // Outcomes of a shadowed instruction.
@@ -128,6 +128,7 @@ struct Machine {
   uint32_t cur_pc = 0, next_pc = 0;
   std::vector<uint32_t> cstack;
   bool done = false, raised = false;
+  unsigned trap_vec = 0;   // a trap a guest uop raised, taken once the instruction retires
   uint32_t vector = 0;
   uint32_t oracle_mmusr = 0;   // the host's MMUSR after the instruction (probe result)
   uint32_t mc_insns = 0;
@@ -319,6 +320,7 @@ struct Machine {
     } else if (o.gform != GF_NONE) {
       gop_out g = gop_eval(o.gfn, o.gsize_bits, a, b, X, N, Z, V, C);
       if (o.writes_rd) R[u.rd] = gop_writeback(o.gform, o.gsize_bits, R[u.rd], g.r);
+      if (g.T) trap_vec = g.T;
       if (o.flags_on) {
         if (o.writes_nzvc) { N = g.N; Z = g.Z; V = g.V; C = g.C; }
         if (o.writes_x) X = g.X;
@@ -601,6 +603,18 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
       xreg = G_D + ((e >> 12) & 7);
       xreg2 = G_D + (e & 7);
     }
+    // DIVU.L / DIVS.L with a 32-bit dividend: by bit 11 (signed), plus 4 when
+    // Dr = Dq (quotient only); a 64-bit dividend (bit 10) stays in millicode
+    if ((cur_op & 0xffc0) == 0x4c40 && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e)) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + (((e >> 10) & 3) | (((e >> 12) & 7) == (e & 7) ? 4 : 0));
+      if (XSEL_LEN[x]) {
+        flow = &FLOW_UOPS[XSEL_START[x]];
+        flow_len = XSEL_LEN[x];
+        kind = K_PLA;
+        xreg = G_D + ((e >> 12) & 7);
+        xreg2 = G_D + (e & 7);
+      }
+    }
     // MOVEC in supervisor state with M = 0: one flow per control register
     if ((cur_op & 0xfffe) == 0x4e7a && sup && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) &&
         !(e & 0x7f8)) {
@@ -646,6 +660,15 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
       m.step(x);
     }
     model_pc = m.gnpc_set ? m.gnpc : pre.pc + ilen + m.full_extra;
+    if (m.fail == R_MATCH && m.trap_vec) {
+      // a trap (zero divide): the instruction has retired, so the exception
+      // stacks the next PC (and, in the format 2 frame, this instruction's)
+      m.R[G_PC] = model_pc;
+      m.raise(m.trap_vec);
+      m.run_from(MC_BASE + MC_EP_EXCEPTION);
+      mc_insns_total += m.mc_insns;
+      model_pc = m.R[G_PC];
+    }
   } else if (kind == K_SEQUENCER) {
     m.run_movem();
     model_pc = pre.pc + ilen + m.full_extra;

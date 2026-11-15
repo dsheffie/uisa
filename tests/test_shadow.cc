@@ -467,6 +467,66 @@ static int random_mull(int n) {
   return bad;
 }
 
+// DIVU.L / DIVS.L with a 32-bit dividend on the PLA path: Dr = Dq or not,
+// over Dn, (A1)+, (d16,A1) and #imm, with signed overflow and zero divisors.
+// A zero divisor traps once the instruction retires: the (A1)+ update stands,
+// C is cleared, and vector 5 stacks a format 2 frame with the next PC.
+static int random_divl_pla(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 4, sreg = rnd() % 8;
+    static const uint16_t eas[4] = {0, 0x19, 0x29, 0x3c};
+    uint16_t op = (uint16_t)(0x4c40 | eas[form] | (form == 0 ? sreg : 0));
+    bool sgn = rnd() & 1;
+    int dq = rnd() % 8, dr = rnd() % 4 == 0 ? dq : rnd() % 8;
+    uint16_t ext = (uint16_t)(dq << 12 | (sgn ? 0x800 : 0) | dr);
+    uisa_m68k_state pre = st(0x2c00, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 8; k++) pre.r[k] = rnd_val();
+    pre.r[9] = 0x20000;
+    pre.r[15] = 0x8000;
+    pre.ctl[UISA_CTL_VBR] = 0x1000;
+    int16_t d16 = (int16_t)(((int)(rnd() % 64) - 32) & ~3);
+    uint32_t src = rnd_val(), addr = 0;
+    int ilen = 4;
+    if (form == 1) addr = pre.r[9];
+    if (form == 2) { addr = pre.r[9] + d16; ilen = 6; }
+    if (form == 3) ilen = 8;
+    int pick = rnd() % 8;
+    if (pick == 0) src = 0;
+    if (pick == 1 && sgn) { src = 0xffffffff; pre.r[dq] = 0x80000000; }
+    if (form == 0) { if (sreg == dq) src = pre.r[dq]; else pre.r[sreg] = src; }
+    uisa_m68k_state post = pre;
+    if (form == 1) post.r[9] += 4;
+    std::vector<std::pair<int, std::pair<uint32_t, uint32_t>>> w;   // stack writes: size, addr, value
+    uint32_t vec_read = 0;
+    if (src != 0) {
+      ref_divl(post, src, ext);
+      post.pc = 0x2c00 + ilen;
+    } else {
+      post.sr &= ~1;
+      w.push_back({2, {0x7ff4, post.sr}});
+      w.push_back({4, {0x7ff6, 0x2c00u + ilen}});
+      w.push_back({2, {0x7ffa, 0x2014}});
+      w.push_back({4, {0x7ffc, 0x2c00}});
+      post.r[15] = 0x7ff4;
+      post.pc = 0x6300;
+      vec_read = 0x6300;
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2c02, 2, ext);
+    if (form == 2) uisa_shadow_log(UISA_LOG_IFETCH, 0x2c04, 2, (uint16_t)d16);
+    if (form == 3) { uisa_shadow_log(UISA_LOG_IFETCH, 0x2c04, 2, src >> 16); uisa_shadow_log(UISA_LOG_IFETCH, 0x2c06, 2, src & 0xffff); }
+    if (form == 1 || form == 2) uisa_shadow_log(UISA_LOG_READ, addr, 4, src);
+    if (vec_read) uisa_shadow_log(UISA_LOG_READ, 0x1014, 4, vec_read);
+    for (auto &x : w) uisa_shadow_log(UISA_LOG_WRITE, x.second.first, x.first, x.second.second);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail(src ? "random divl pla" : "random divl pla (zero)", op, ext, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random divl pla: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -858,6 +918,7 @@ int main() {
   fails += random_movec(20000);
   fails += random_sr(20000);
   fails += random_mull(40000);
+  fails += random_divl_pla(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
