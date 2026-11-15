@@ -24,6 +24,7 @@ word, see `bitfield:` in flows.yaml) also use:
   {bfw@k}                                the width operand of a BFI-format op; the
                                          descriptor before it already carries it
   {dx@k}                                 the data register in bits 14:12
+  {rn@k}                                 the general register in bits 15:12 (MOVEC)
   {kind@k|bf}                            the reference plus offset / 8
   ...+N                                  any reference plus a constant
 """
@@ -47,7 +48,7 @@ SIZE_BITS = {"B": 8, "W": 16, "L": 32}
 SAMPLE = {"d16": "8", "d8": "4", "abs.W": "64", "abs.L": "64", "imm.B": "5", "imm.W": "5",
           "imm.L": "5", "br.W": "6", "br.L": "6", "pc16": "6", "pc8": "6", "xn": "d1",
           "bfb": "0", "bfm1": "8", "bfm2": "8", "bfm3": "8", "bfm4": "8", "bfr": "8", "bfi": "8",
-          "bfw": "8", "dx": "d1"}
+          "bfw": "8", "dx": "d1", "rn": "a1"}
 RUNTIME = re.compile(r"\{([A-Za-z0-9.]+)@(\d+)(?:\|bf)?\}(?:\+\d+)?")
 BF_OPS = ["BFTST", "BFEXTU", "BFCHG", "BFEXTS", "BFCLR", "BFFFO", "BFSET", "BFINS"]
 BF_MODES = {2: "(An)", 5: "(d16,An)", 6: "(d8,An,Xn)"}
@@ -356,6 +357,49 @@ class Expander:
                 out["long"] = Flow("pla", self.peephole([self.subst(x, b2) for x in list(pre) + self.f["bitfield"]["load"][4] + body])) if body else out[4]
         return out
 
+    def movec_variants(self, op):
+        """Flows for MOVEC (4e7a read, 4e7b write) in supervisor state with M = 0,
+        keyed by the 16-way control-register index; None where millicode runs."""
+        if op not in (0x4E7A, 0x4E7B):
+            return None
+        mc = self.f["movec"]
+        rw = "write" if op & 1 else "read"
+        out = {}
+        for v, csr in enumerate(mc["regs"]):
+            if csr is None:
+                out[v] = None
+            elif csr == "isp":
+                out[v] = Flow("pla", [self.subst(x, {"{Rn}": "{rn@2}"}) for x in mc["active_" + rw]])
+            else:
+                out[v] = Flow("pla", [self.subst(x, {"{Rn}": "{rn@2}", "{csr}": csr}) for x in mc[rw]])
+        return out
+
+    def sr_variants(self, op):
+        """Supervisor-state (M = 0) flows for MOVE SR,Dn (40c0-40c7), MOVE Dn,SR
+        (46c0-46c7) and MOVE #imm,SR (46fc: [S stays 1, S goes to 0])."""
+        sr = self.f["sr"]
+        b = {"{T}": self.t["t4"], "{Dn}": "d%d" % (op & 7)}
+        def fl(key):
+            return Flow("pla", [self.subst(x, b) for x in sr[key]])
+        if op & 0xFFF8 == 0x40C0:
+            return [fl("from_sr")]
+        if op & 0xFFF8 == 0x46C0:
+            return [fl("to_sr")]
+        if op == 0x46FC:
+            return [fl("imm"), fl("imm_user")]
+        return None
+
+    def xsel_variants(self, op):
+        """Second-level-decode flows of an opword as a list indexed by variant
+        (None where millicode runs), or None if the opword has none."""
+        bf = self.bf_variants(op)
+        if bf:
+            return [bf[k] for k in (1, 2, 3, 4, "long")]
+        mv = self.movec_variants(op)
+        if mv:
+            return [mv[k] for k in range(16)]
+        return self.sr_variants(op)
+
     @staticmethod
     def subst(line, b):
         for k, v in b.items():
@@ -426,6 +470,19 @@ def cmd_show(a):
                 print("          " + u)
             for e in check(spec, v):
                 print("   !! " + e)
+        for n, v in enumerate(ex.sr_variants(op) or []):
+            what = ("; new S = 1", "; new S = 0")[n] if op == 0x46FC else ""
+            print("      S = 1, M = 0%s: %d uops" % (what, v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
+        mv = ex.movec_variants(op) or {}
+        for n, v in mv.items():
+            if v:
+                print("      %s (S = 1, M = 0): %s" % (ex.f["movec"]["regs"][n], "; ".join(v.uops)))
+                for e in check(spec, v):
+                    print("   !! " + e)
 
 
 def cmd_check(a):
@@ -435,8 +492,8 @@ def cmd_check(a):
         fl = ex.expand(op)
         kinds[fl.kind] += 1
         e = check(spec, fl) if fl.kind == "pla" else []
-        for v in (ex.bf_variants(op) or {}).values():
-            e += check(spec, v)
+        for v in ex.xsel_variants(op) or []:
+            e += check(spec, v) if v else []
         if True:
             if e:
                 form = m68kdec.decode(op).form()

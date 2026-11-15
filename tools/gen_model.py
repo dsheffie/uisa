@@ -9,15 +9,18 @@ from the extension word at ioff), which the expander writes as the pair
 `ik` says how to form the immediate at run time from the instruction's
 extension words (IK_* below); bit 7 negates it, bit 6 adds the bitfield byte
 offset (bits 10:9 of the extension word at offset 2), and `imm` is added to
-any run-time value. Register number 60 (G_BFX) is the data register named by
-bits 14:12 of a bitfield extension word, which the front end substitutes.
+any run-time value. Register number 60 (G_XREG) is the register named by the
+extension word at offset 2, which the front end substitutes: bits 14:12 (Dn)
+for a bitfield, bits 15:12 (Dn/An) for MOVEC.
 
-Bitfield opwords also get XSEL flows: when the extension word's offset and
-width are immediates, the front end picks XSEL_START/LEN[XSEL_INDEX[op]*5 + v]
-(v = bytes the field touches - 1, or 4 for a whole long; see flows.yaml
-`bitfield:`) instead of entering millicode.
+Second-level decode (XSEL): bitfield, MOVEC and MOVE to/from SR opwords have up to XSEL_NV
+flows each, XSEL_START/LEN[XSEL_INDEX[op]*XSEL_NV + v], chosen from the
+extension word and the S and M bits (flows.yaml `bitfield:`, `movec:`, `sr:`);
+length 0 marks a variant
+that enters millicode.
 """
 
+import collections
 import os
 import re
 import sys
@@ -31,7 +34,8 @@ import uisa  # noqa: E402
 BUILD = os.path.join(HERE, "..", "build")
 IK = ["CONST", "d16", "d8", "abs.W", "abs.L", "imm.B", "imm.W", "imm.L", "br.W", "br.L", "pc16", "pc8",
       "bfb", "bfm1", "bfm2", "bfm3", "bfm4", "bfr", "bfi"]
-G_BFX = 60
+G_XREG = 60
+XSEL_NV = 16
 KINDS = ["illegal", "pla", "sequencer", "millicode", "unmapped"]
 REF = re.compile(r"^(-?)\{([A-Za-z0-9.]+)@(\d+)(\|bf)?\}(?:\+(\d+))?$")
 
@@ -43,8 +47,8 @@ class Gen:
 
     def reg(self, tok):
         tok = tok.strip()
-        if tok == "{dx@2}":
-            return G_BFX
+        if tok in ("{dx@2}", "{rn@2}"):
+            return G_XREG
         return self.spec.regs[tok]
 
     def imm(self, tok):
@@ -67,6 +71,8 @@ class Gen:
                 m = re.match(r"^(.*)\((.+)\)$", tok)
                 f["rs1"] = self.reg(m.group(2))
                 f["ik"], f["ioff"], f["imm"] = self.imm(m.group(1) or "0")
+            elif kind == "csr" and tok in self.spec.csr_by_name:
+                f["imm"] = self.spec.csr_by_name[tok]
             elif kind in ("imm", "csr", "off"):
                 f["ik"], f["ioff"], f["imm"] = self.imm(tok)
             elif kind == "wid":
@@ -112,14 +118,15 @@ def main():
         lens.append(len(us))
         ilens.append(m68kdec.length(op)[0])
         pool.extend(us)
-    xsel_index, xsel_start, xsel_len = [-1] * 65536, [], []
+    xsel_index, xsel_start, xsel_len, nx = [-1] * 65536, [], [], collections.Counter()
     for op in range(65536):
-        vs = g.ex.bf_variants(op)
+        vs = g.ex.xsel_variants(op)
         if not vs:
             continue
-        xsel_index[op] = len(xsel_start) // 5
-        for key in (1, 2, 3, 4, "long"):
-            us = g.lower(vs[key])
+        nx["movec" if op in (0x4E7A, 0x4E7B) else "bitfield" if op & 0xF8C0 == 0xE8C0 else "sr"] += 1
+        xsel_index[op] = len(xsel_start) // XSEL_NV
+        for v in range(XSEL_NV):
+            us = g.lower(vs[v]) if v < len(vs) and vs[v] else []
             xsel_start.append(len(pool))
             xsel_len.append(len(us))
             pool.extend(us)
@@ -143,12 +150,13 @@ def main():
     arr("uint8_t", "FLOW_LEN", lens)
     arr("uint8_t", "FLOW_ILEN", ilens)
     arr("int16_t", "XSEL_INDEX", xsel_index)
+    o.append("enum { XSEL_NV = %d };" % XSEL_NV)
     o.append("static const uint32_t XSEL_START[%d] = {%s};" % (len(xsel_start), ",".join(map(str, xsel_start))))
     o.append("static const uint8_t XSEL_LEN[%d] = {%s};" % (len(xsel_len), ",".join(map(str, xsel_len))))
     os.makedirs(BUILD, exist_ok=True)
     with open(os.path.join(BUILD, "uisa_flows.inc"), "w") as f:
         f.write("\n".join(o) + "\n")
-    print("uisa_flows.inc: %d uops, %d bitfield opwords with XSEL flows; %s" % (len(pool), len(xsel_start) // 5, ", ".join(
+    print("uisa_flows.inc: %d uops, XSEL opwords: %s; %s" % (len(pool), ", ".join("%s %d" % kv for kv in sorted(nx.items())), ", ".join(
         "%s %d" % (k, kinds.count(i)) for i, k in enumerate(KINDS))))
 
 

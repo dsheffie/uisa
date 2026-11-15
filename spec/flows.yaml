@@ -323,5 +323,36 @@ bitfield:
     BFCHG:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "orn {F}, x0, {F}", "bfinsi {V}, {F}, {bf}"]}
     BFINS:  {write: true, body: ["bfextsi {F}, {Dx}, {bfi}", "mov.32 x0, {F}", "bfinsi {V}, {Dx}, {bf}"]}
 
+# MOVEC: a second-level decode on the extension word. The front end knows S
+# and M at decode (every write to them serializes), so in supervisor state it
+# issues one of these flows, chosen by the control register (the 16-way index
+# (code bit 11) << 3 | code bits 2:0; codes with bits 10:3 set, and code 802,
+# stay in millicode, which raises the illegal-instruction exception). In user
+# state the front end enters millicode, which raises the privilege violation.
+# {Rn} is the general register in extension bits 15:12 (D0-D7, A0-A7). ISP is
+# the active A7 while M = 0, and MSP while M = 1; the `active` forms are used
+# for whichever is active, and M = 1 stays in millicode.
+movec:
+  regs: [sfc, dfc, cacr, tc, itt0, itt1, dtt0, dtt1, usp, vbr, null, msp, isp, mmusr, urp, srp]
+  read: ["csrr {Rn}, {csr}"]
+  write: ["csrw {csr}, {Rn}"]
+  active_read: ["add {Rn}, a7, x0"]
+  active_write: ["add a7, {Rn}, x0"]
+
+# MOVE SR,Dn / MOVE Dn,SR / MOVE #imm,SR in supervisor state with M = 0
+# (known at decode, as for MOVEC; otherwise millicode). MOVE Dn,SR may leave
+# supervisor state, so its flow switches stacks without branches: with
+# S' = the new S bit, ISP' = S' ? ISP : A7 and A7' = S' ? A7 : USP. For
+# MOVE #imm,SR the front end sees the new S bit and picks `imm` (S stays 1)
+# or `imm_user` (S goes to 0); an immediate with M = 1 stays in millicode.
+# {Dn} is the data register in opword bits 2:0, {T} scratch.
+sr:
+  from_sr: ["rdccr {T}", "or {T}, {T}, gsr", "mrg16 {Dn}, {Dn}, {T}"]
+  to_sr: ["andi x28, {Dn}, 0x2000", "csrr x29, isp", "czeqz x29, x29, x28", "cznez x30, a7, x28",
+          "or x29, x29, x30", "csrr x31, usp", "cznez x31, x31, x28", "czeqz a7, a7, x28", "or a7, a7, x31",
+          "csrw isp, x29", "wrccr {Dn}", "andi gsr, {Dn}, 0xf700"]
+  imm: ["addi {T}, x0, {imm.W@2}", "wrccr {T}", "andi gsr, {T}, 0xf700"]
+  imm_user: ["addi {T}, x0, {imm.W@2}", "wrccr {T}", "andi gsr, {T}, 0xf700", "csrw isp, a7", "csrr a7, usp"]
+
 params:
   movem_regs: 5   # assumed registers per MOVEM for the uop estimate

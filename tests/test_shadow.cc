@@ -340,6 +340,75 @@ static int random_bfread(int n, bool full_ok) {
 // front end's second-level decode sends each case where it should: immediate
 // offset and width (and, for memory, a field within 4 bytes; never BFFFO on
 // memory) to a PLA flow, everything else to millicode.
+// MOVEC Rc,Rn / Rn,Rc for every control register, D/A general registers and
+// both M states. In supervisor state with M = 0 the front end issues a PLA
+// flow; with M = 1 it enters millicode.
+static int random_movec(int n) {
+  static const int ctl[16] = {UISA_CTL_SFC, UISA_CTL_DFC, UISA_CTL_CACR, UISA_CTL_TC, UISA_CTL_ITT0, UISA_CTL_ITT1,
+                              UISA_CTL_DTT0, UISA_CTL_DTT1, UISA_CTL_USP, UISA_CTL_VBR, -1, UISA_CTL_MSP,
+                              UISA_CTL_ISP, UISA_CTL_MMUSR, UISA_CTL_URP, UISA_CTL_SRP};
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int v = rnd() % 16;
+    if (v == 10) continue;
+    bool write = rnd() & 1, m = rnd() % 8 == 0;
+    int rn = rnd() % 16;
+    uint16_t op = write ? 0x4e7b : 0x4e7a, code = (uint16_t)((v & 8) << 8 | (v & 7));
+    uint16_t ext = (uint16_t)(rn << 12 | code);
+    uisa_m68k_state pre = st(0x2600, (uint16_t)(0x2700 | (m ? 0x1000 : 0) | (rnd() & 0x1f)));
+    for (int r = 0; r < 16; r++) pre.r[r] = rnd_val();
+    for (int c = 0; c < UISA_CTL_NUM; c++) pre.ctl[c] = rnd_val();
+    uisa_m68k_state post = pre;
+    post.pc = 0x2604;
+    int c = ctl[v];
+    bool active = (c == UISA_CTL_ISP && !m) || (c == UISA_CTL_MSP && m);   // the active A7
+    if (write) {
+      if (active) post.r[15] = pre.r[rn]; else post.ctl[c] = pre.r[rn];
+    } else {
+      post.r[rn] = active ? pre.r[15] : pre.ctl[c];
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2602, 2, ext);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random movec", op, ext, 0);
+    if ((uisa_shadow_kind_total(1) != pla + 1) != m && bad++ < 5)
+      ref_fail(m ? "random movec: expected millicode" : "random movec: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
+// MOVE SR,Dn / MOVE Dn,SR / MOVE #imm,SR in supervisor state with M = 0,
+// including moves to user state (A7 becomes the USP, the ISP takes the old
+// A7). These all take PLA flows. (The new SR keeps M = 0 and T = 0.)
+static int random_sr(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 3, r = rnd() % 8;
+    uint16_t op = (uint16_t)(form == 0 ? 0x40c0 | r : form == 1 ? 0x46c0 | r : 0x46fc);
+    uisa_m68k_state pre = st(0x2800, (uint16_t)(0x2000 | (rnd() & 0x71f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    for (int c = 0; c < UISA_CTL_NUM; c++) pre.ctl[c] = rnd_val();
+    uint16_t nv = (uint16_t)((rnd() & 0x271f) | (rnd() % 4 ? 0x2000 : 0));
+    if (form == 1) pre.r[r] = (pre.r[r] & 0xffff0000) | nv;
+    uisa_m68k_state post = pre;
+    post.pc = form == 2 ? 0x2804 : 0x2802;
+    if (form == 0) {
+      post.r[r] = (pre.r[r] & 0xffff0000) | pre.sr;
+    } else {
+      post.sr = nv;
+      if (!(nv & 0x2000)) { post.ctl[UISA_CTL_ISP] = pre.r[15]; post.r[15] = pre.ctl[UISA_CTL_USP]; }
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    if (form == 2) uisa_shadow_log(UISA_LOG_IFETCH, 0x2802, 2, nv);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random sr", op, nv, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random sr: expected a PLA flow", op, nv, 0);
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -728,6 +797,8 @@ int main() {
   fails += random_bfwrite(20000);
   fails += random_bfread(40000, BF_FULL_OK);
   fails += random_bfpath(40000);
+  fails += random_movec(20000);
+  fails += random_sr(20000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
