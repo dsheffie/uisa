@@ -1,4 +1,4 @@
-; Millicode for TAS and the 68040 cache and MMU instructions.
+; Millicode for TAS, CAS and the 68040 cache and MMU instructions.
 
 ; ---------------------------------------------------------------------------
 ; TAS <ea>: test a byte, then set its bit 7 (locked read-modify-write)
@@ -22,6 +22,86 @@ tas_mem:
         mov.8z  x0, x11
         ori     x11, x11, 0x80
         stu.8.gd x11, 0(x23)
+        call    commit_an
+        jal     x0, exit
+
+; ---------------------------------------------------------------------------
+; CAS Dc,Du,<ea>: compare the operand at <ea> with Dc; if equal, store Du
+; there, otherwise load the operand into Dc (a locked read-modify-write; a
+; failed compare ends the sequence with unlock and writes nothing). Size in
+; opword bits 10:9 (1 B, 2 W, 3 L); the extension word has Du in bits 8:6 and
+; Dc in bits 2:0. The store, or the unlock, comes before any guest register
+; or flag changes (faults before commits). The flags are those of CMP Dc,<ea>.
+; <ea> must be memory alterable; other modes raise the illegal instruction.
+; ---------------------------------------------------------------------------
+cas:
+        srli    x7, x1, 3
+        andi    x7, x7, 7               ; EA mode
+        addi    x16, x0, 2
+        b.ltu   x7, x16, illegal        ; Dn, An
+        addi    x16, x0, 7
+        b.ne    x7, x16, cas_ea_ok
+        andi    x7, x1, 7
+        addi    x16, x0, 2
+        b.geu   x7, x16, illegal        ; only abs.W and abs.L in mode 7
+cas_ea_ok:
+        srli    x5, x1, 9
+        andi    x5, x5, 3               ; size code
+        addi    x6, x0, 1
+        addi    x7, x5, -1
+        sll     x21, x6, x7             ; size in bytes: 1, 2, 4
+        srli    x18, x2, 16             ; extension word
+        andi    x8, x18, 7              ; Dc
+        srli    x9, x18, 6
+        andi    x9, x9, 7               ; Du
+        rdg     x12, x8
+        rdg     x13, x9
+        andi    x20, x1, 0x3f
+        addi    x22, x0, 4              ; the EA's words follow the extension word
+        call    ea_addr                 ; x23 = address
+        b.eq    x5, x6, cas_b
+        addi    x7, x0, 2
+        b.eq    x5, x7, cas_w
+        ldl.32.gd x11, 0(x23)
+        b.ne    x11, x12, cas_l_ne
+        stu.32.gd x13, 0(x23)
+        cmp.32  x11, x12
+        jal     x0, cas_done
+cas_l_ne:
+        unlock
+        cmp.32  x11, x12
+        wrg     x8, x11
+        jal     x0, cas_done
+cas_w:
+        ldl.16.gd x11, 0(x23)
+        zext16  x14, x12
+        b.ne    x11, x14, cas_w_ne
+        stu.16.gd x13, 0(x23)
+        cmp.16  x11, x12
+        jal     x0, cas_done
+cas_w_ne:
+        unlock
+        cmp.16  x11, x12
+        srli    x14, x12, 16            ; Dc keeps its upper word
+        slli    x14, x14, 16
+        or      x14, x14, x11
+        wrg     x8, x14
+        jal     x0, cas_done
+cas_b:
+        ldl.8.gd x11, 0(x23)
+        andi    x14, x12, 0xff
+        b.ne    x11, x14, cas_b_ne
+        stu.8.gd x13, 0(x23)
+        cmp.8   x11, x12
+        jal     x0, cas_done
+cas_b_ne:
+        unlock
+        cmp.8   x11, x12
+        srli    x14, x12, 8             ; Dc keeps its upper 24 bits
+        slli    x14, x14, 8
+        or      x14, x14, x11
+        wrg     x8, x14
+cas_done:
         call    commit_an
         jal     x0, exit
 

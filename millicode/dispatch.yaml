@@ -33,6 +33,7 @@ handlers:
   DIVS: divw
   DIVx: divl
   TAS: tas
+  CAS: cas
   CINV: cache
   CPUSH: cache
   PFLUSH: pflush

@@ -327,7 +327,7 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `csrw` | S | SYS fn=4 | csr, rs1 | `CSR_WRITE(IMM, a & CSR_WMASK[IMM & 0xff]);` | (serializes) |
 | `csrs` | S | SYS fn=5 | csr, rs1 | `CSR_WRITE(IMM, (CSR_READ(IMM) \| a) & CSR_WMASK[IMM & 0xff]);` | (serializes) |
 | `csrc` | S | SYS fn=6 | csr, rs1 | `CSR_WRITE(IMM, CSR_READ(IMM) & ~a & CSR_WMASK[IMM & 0xff]);` | (serializes) |
-| `unlock` | S | SYS fn=7 |  |  | End a locked sequence without a store (failed CAS compare). (serializes) |
+| `unlock` | S | SYS fn=7 |  | `/* ends the locked sequence; no functional effect */` | End a locked sequence without a store (failed CAS compare). (serializes) |
 | `fence` | S | SYS fn=8 |  |  | Order all earlier memory accesses before all later ones. (serializes) |
 | `tlbflush` | S | SYS fn=9 | rs1, imm | `MMU_FLUSH(a, IMM);` | Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA. (serializes) |
 | `cpush` | S | SYS fn=10 | rs1, imm | `CACHE_OP(a, IMM, 1);` | Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1. (serializes) |

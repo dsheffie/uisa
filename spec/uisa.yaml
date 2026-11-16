@@ -271,7 +271,7 @@ base_ops:
   - {name: csrw,    major: SYS, fn: 4,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, a & CSR_WMASK[IMM & 0xff]);"}
   - {name: csrs,    major: SYS, fn: 5,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, (CSR_READ(IMM) | a) & CSR_WMASK[IMM & 0xff]);"}
   - {name: csrc,    major: SYS, fn: 6,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, CSR_READ(IMM) & ~a & CSR_WMASK[IMM & 0xff]);"}
-  - {name: unlock,  major: SYS, fn: 7,  fmt: S, asm: [], unit: mem, serialize: true, desc: "End a locked sequence without a store (failed CAS compare)."}
+  - {name: unlock,  major: SYS, fn: 7,  fmt: S, asm: [], unit: mem, serialize: true, sem: "/* ends the locked sequence; no functional effect */", desc: "End a locked sequence without a store (failed CAS compare)."}
   - {name: fence,   major: SYS, fn: 8,  fmt: S, asm: [], unit: mem, serialize: true, desc: "Order all earlier memory accesses before all later ones."}
   - {name: tlbflush, major: SYS, fn: 9, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA.", sem: "MMU_FLUSH(a, IMM);"}
   - {name: cpush,   major: SYS, fn: 10, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1.", sem: "CACHE_OP(a, IMM, 1);"}

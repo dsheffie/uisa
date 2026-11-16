@@ -668,6 +668,62 @@ static int random_cmpm(int n) {
   return bad;
 }
 
+// CAS Dc,Du,<ea> for each size and memory-alterable mode, with equal and
+// unequal operands (millicode): an equal compare stores Du, an unequal one
+// loads the operand into Dc's low bits and stores nothing.
+static int random_cas(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int sz = rnd() % 3, nb = 1 << sz, form = rnd() % 6, an = rnd() % 8;
+    int dc = rnd() % 8, du = rnd() % 4 == 0 ? dc : rnd() % 8;
+    static const int modes[6][2] = {{2, -1}, {3, -1}, {4, -1}, {5, -1}, {7, 0}, {7, 1}};
+    int mode = modes[form][0], reg = modes[form][1] < 0 ? an : modes[form][1];
+    uint16_t op = (uint16_t)(0x08c0 | (sz + 1) << 9 | mode << 3 | reg);
+    uint16_t ext = (uint16_t)(du << 6 | dc);
+    uisa_m68k_state pre = st(0x3400, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 8; k++) pre.r[k] = rnd_val();
+    for (int k = 8; k < 16; k++) pre.r[k] = 0x50000 + (uint32_t)(k - 8) * 0x1000 + (rnd() % 16) * 4;
+    uint32_t m = nb == 4 ? 0xffffffffu : (1u << (8 * nb)) - 1;
+    int inc = (nb == 1 && an == 7) ? 2 : nb;
+    uisa_m68k_state post = pre;
+    uint32_t ea = 0;
+    int len = 4;
+    int16_t d16 = (int16_t)(rnd() % 512 - 256);
+    switch (form) {
+    case 0: ea = pre.r[8 + an]; break;
+    case 1: ea = pre.r[8 + an]; post.r[8 + an] += inc; break;
+    case 2: ea = pre.r[8 + an] - inc; post.r[8 + an] = ea; break;
+    case 3: ea = pre.r[8 + an] + (uint32_t)(int32_t)d16; len = 6; break;
+    case 4: ea = 0x6000 + (rnd() % 64) * 2; len = 6; break;
+    case 5: ea = 0x00070000 + (rnd() % 64) * 2; len = 8; break;
+    }
+    uint32_t v = rnd() % 3 == 0 ? pre.r[dc] & m : rnd_val() & m, c = pre.r[dc] & m;
+    bool eq = v == c;
+    uint32_t res = (v - c) & m, sb = 1u << (8 * nb - 1);
+    uint16_t ccr = pre.sr & 0x10;
+    if (res & sb) ccr |= 8;
+    if (res == 0) ccr |= 4;
+    if (((v ^ c) & (v ^ res)) & sb) ccr |= 2;
+    if (c > v) ccr |= 1;
+    post.sr = (pre.sr & 0xff00) | ccr;
+    if (!eq) post.r[dc] = (pre.r[dc] & ~m) | v;
+    post.pc = 0x3400 + (uint32_t)len;
+    uint64_t before = uisa_shadow_count(op, 0);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x3402, 2, ext);
+    if (form == 3 || form == 4) uisa_shadow_log(UISA_LOG_IFETCH, 0x3404, 2, form == 3 ? (uint16_t)d16 : ea);
+    if (form == 5) uisa_shadow_log(UISA_LOG_IFETCH, 0x3404, 4, ea);
+    uisa_shadow_log(UISA_LOG_READ, ea, nb, v);
+    if (eq) uisa_shadow_log(UISA_LOG_WRITE, ea, nb, pre.r[du] & m);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) {
+      printf("  cas: size %d form %d dc %d du %d eq %d\n", nb, form, dc, du, eq);
+      ref_fail("random cas", op, ext, 0);
+    }
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -1063,6 +1119,7 @@ int main() {
   fails += random_moves(40000);
   fails += random_dbcc(40000);
   fails += random_cmpm(40000);
+  fails += random_cas(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
