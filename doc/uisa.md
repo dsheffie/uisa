@@ -324,9 +324,9 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `gpcaddi` | I | GPCADDI | rd, imm | `r = GPC_INSN + b;` | rd = guest instruction address + imm (return addresses, PC-relative operands). |
 | `ret` | S | SYS fn=2 |  | `npc = CSTACK_POP();` | Return through the hardware millicode return stack. Underflow is a millicode fault. |
 | `csrr` | S | SYS fn=3 | rd, csr | `r = CSR_READ(IMM);` |  |
-| `csrw` | S | SYS fn=4 | csr, rs1 | `CSR_WRITE(IMM, a);` | (serializes) |
-| `csrs` | S | SYS fn=5 | csr, rs1 | `CSR_WRITE(IMM, CSR_READ(IMM) \| a);` | (serializes) |
-| `csrc` | S | SYS fn=6 | csr, rs1 | `CSR_WRITE(IMM, CSR_READ(IMM) & ~a);` | (serializes) |
+| `csrw` | S | SYS fn=4 | csr, rs1 | `CSR_WRITE(IMM, a & CSR_WMASK[IMM & 0xff]);` | (serializes) |
+| `csrs` | S | SYS fn=5 | csr, rs1 | `CSR_WRITE(IMM, (CSR_READ(IMM) \| a) & CSR_WMASK[IMM & 0xff]);` | (serializes) |
+| `csrc` | S | SYS fn=6 | csr, rs1 | `CSR_WRITE(IMM, CSR_READ(IMM) & ~a & CSR_WMASK[IMM & 0xff]);` | (serializes) |
 | `unlock` | S | SYS fn=7 |  |  | End a locked sequence without a store (failed CAS compare). (serializes) |
 | `fence` | S | SYS fn=8 |  |  | Order all earlier memory accesses before all later ones. (serializes) |
 | `tlbflush` | S | SYS fn=9 | rs1, imm | `MMU_FLUSH(a, IMM);` | Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA. (serializes) |
@@ -726,43 +726,43 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 
 ## Control and status registers
 
-| Number | Name | Description |
-|---|---|---|
-| 0x00 | `vbr` | 68k vector base register. |
-| 0x01 | `sfc` | Source function code (galt loads). |
-| 0x02 | `dfc` | Destination function code (galt stores and probes). |
-| 0x03 | `cacr` | 68040 cache control. |
-| 0x04 | `tc` | 68040 MMU translation control. |
-| 0x05 | `itt0` | Instruction transparent translation 0. |
-| 0x06 | `itt1` | Instruction transparent translation 1. |
-| 0x07 | `dtt0` | Data transparent translation 0. |
-| 0x08 | `dtt1` | Data transparent translation 1. |
-| 0x09 | `mmusr` | MMU status (PTEST result, from probe). |
-| 0x0a | `urp` | User root pointer. |
-| 0x0b | `srp` | Supervisor root pointer. |
-| 0x0c | `usp` | Inactive user stack pointer. |
-| 0x0d | `isp` | Inactive interrupt stack pointer. |
-| 0x0e | `msp` | Inactive master stack pointer. |
-| 0x20 | `fpcr` | Reserved for the FP extension. |
-| 0x21 | `fpsr` | Reserved for the FP extension. |
-| 0x22 | `fpiar` | Reserved for the FP extension. |
-| 0x40 | `mstatus` | Micro-engine status: pending interrupt level, trace pending, locked-sequence active. |
-| 0x41 | `fault_addr` | Guest access fault: faulting address (68040 frame FA and WB3A). |
-| 0x42 | `fault_status` | Guest access fault: 68040 special status word (SSW): read/write, size, transfer type and modifier, continuation bits. |
-| 0x43 | `fault_pc` | Guest PC of the instruction that faulted. |
-| 0x44 | `mcycle` | Cycle counter. |
-| 0x45 | `ginstret` | Guest instructions retired. |
-| 0x46 | `dispatch_base` | Hidden-memory base of the opword dispatch table. |
-| 0x47 | `scratch_base` | Hidden-memory base of millicode scratch storage. |
-| 0x48 | `fault_ea` | Guest access fault: effective address of the faulting instruction (68040 frame EA). |
-| 0x49 | `wb2_status` | Guest access fault: pending writeback 2 status (68040 frame WB2S). |
-| 0x4a | `wb2_addr` | Guest access fault: pending writeback 2 address (WB2A). |
-| 0x4b | `wb3_status` | Guest access fault: pending writeback 3 status (WB3S); WB3 is the faulting store. |
-| 0x4c | `wb3_data` | Guest access fault: pending writeback 3 data (WB3D). |
-| 0x4d | `fault_pd0` | Guest access fault: MOVE16 line data 0 / writeback 1 data (PD0, WB1D). |
-| 0x4e | `fault_pd1` | Guest access fault: MOVE16 line data 1 (PD1). |
-| 0x4f | `fault_pd2` | Guest access fault: MOVE16 line data 2 (PD2). |
-| 0x50 | `fault_pd3` | Guest access fault: MOVE16 line data 3 (PD3). |
+| Number | Name | Implemented bits | Description |
+|---|---|---|---|
+| 0x00 | `vbr` | all | 68k vector base register. |
+| 0x01 | `sfc` | `0x00000007` | Source function code (galt loads). |
+| 0x02 | `dfc` | `0x00000007` | Destination function code (galt stores and probes). |
+| 0x03 | `cacr` | `0x80008000` | 68040 cache control. |
+| 0x04 | `tc` | `0x0000c000` | 68040 MMU translation control. |
+| 0x05 | `itt0` | `0xffffe364` | Instruction transparent translation 0. |
+| 0x06 | `itt1` | `0xffffe364` | Instruction transparent translation 1. |
+| 0x07 | `dtt0` | `0xffffe364` | Data transparent translation 0. |
+| 0x08 | `dtt1` | `0xffffe364` | Data transparent translation 1. |
+| 0x09 | `mmusr` | all | MMU status (PTEST result, from probe). |
+| 0x0a | `urp` | `0xfffffe00` | User root pointer. |
+| 0x0b | `srp` | `0xfffffe00` | Supervisor root pointer. |
+| 0x0c | `usp` | all | Inactive user stack pointer. |
+| 0x0d | `isp` | all | Inactive interrupt stack pointer. |
+| 0x0e | `msp` | all | Inactive master stack pointer. |
+| 0x20 | `fpcr` | all | Reserved for the FP extension. |
+| 0x21 | `fpsr` | all | Reserved for the FP extension. |
+| 0x22 | `fpiar` | all | Reserved for the FP extension. |
+| 0x40 | `mstatus` | all | Micro-engine status: pending interrupt level, trace pending, locked-sequence active. |
+| 0x41 | `fault_addr` | all | Guest access fault: faulting address (68040 frame FA and WB3A). |
+| 0x42 | `fault_status` | all | Guest access fault: 68040 special status word (SSW): read/write, size, transfer type and modifier, continuation bits. |
+| 0x43 | `fault_pc` | all | Guest PC of the instruction that faulted. |
+| 0x44 | `mcycle` | all | Cycle counter. |
+| 0x45 | `ginstret` | all | Guest instructions retired. |
+| 0x46 | `dispatch_base` | all | Hidden-memory base of the opword dispatch table. |
+| 0x47 | `scratch_base` | all | Hidden-memory base of millicode scratch storage. |
+| 0x48 | `fault_ea` | all | Guest access fault: effective address of the faulting instruction (68040 frame EA). |
+| 0x49 | `wb2_status` | all | Guest access fault: pending writeback 2 status (68040 frame WB2S). |
+| 0x4a | `wb2_addr` | all | Guest access fault: pending writeback 2 address (WB2A). |
+| 0x4b | `wb3_status` | all | Guest access fault: pending writeback 3 status (WB3S); WB3 is the faulting store. |
+| 0x4c | `wb3_data` | all | Guest access fault: pending writeback 3 data (WB3D). |
+| 0x4d | `fault_pd0` | all | Guest access fault: MOVE16 line data 0 / writeback 1 data (PD0, WB1D). |
+| 0x4e | `fault_pd1` | all | Guest access fault: MOVE16 line data 1 (PD1). |
+| 0x4f | `fault_pd2` | all | Guest access fault: MOVE16 line data 2 (PD2). |
+| 0x50 | `fault_pd3` | all | Guest access fault: MOVE16 line data 3 (PD3). |
 
 ## Millicode entry points
 

@@ -315,7 +315,16 @@ struct opinfo {
     g.append("  switch (code) {")
     for c in spec.base_conds:
         g.append("  case %d: return %s; // %s" % (c["code"], c["expr"], c["name"]))
-    g += ["  }", "  return false;", "}", "", "} // namespace uisa", ""]
+    g += ["  }", "  return false;", "}", ""]
+    # CSR write masks: bits a CSR implements (unimplemented bits read as 0)
+    masks = ["0xffffffffu"] * 256
+    for c in spec.csrs:
+        masks[c["num"]] = "0x%08xu" % c.get("wmask", 0xffffffff)
+    g.append("// implemented bits of each CSR: writes keep only these (spec `csrs` wmask)")
+    g.append("static const uint32_t CSR_WMASK[256] = {")
+    for i in range(0, 256, 8):
+        g.append("  " + ", ".join(masks[i:i + 8]) + ",")
+    g += ["};", "", "} // namespace uisa", ""]
     write("uisa.h", text + "\n".join(g))
 
     # per-op semantics for base ops, to be included inside an ISS switch
@@ -523,10 +532,12 @@ def gen_doc(spec):
 
     out.append("## Control and status registers")
     out.append("")
-    out.append("| Number | Name | Description |")
-    out.append("|---|---|---|")
+    out.append("| Number | Name | Implemented bits | Description |")
+    out.append("|---|---|---|---|")
     for c in d["csrs"]:
-        out.append("| 0x%02x | `%s` | %s |" % (c["num"], c["name"], md_escape(c["desc"])))
+        wm = c.get("wmask")
+        out.append("| 0x%02x | `%s` | %s | %s |" % (c["num"], c["name"], "`0x%08x`" % wm if wm is not None else "all",
+                                                md_escape(c["desc"])))
     out.append("")
 
     out.append("## Millicode entry points")

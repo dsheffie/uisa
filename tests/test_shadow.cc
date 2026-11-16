@@ -363,7 +363,13 @@ static int random_movec(int n) {
     int c = ctl[v];
     bool active = (c == UISA_CTL_ISP && !m) || (c == UISA_CTL_MSP && m);   // the active A7
     if (write) {
-      if (active) post.r[15] = pre.r[rn]; else post.ctl[c] = pre.r[rn];
+      // the 68040 keeps only a control register's implemented bits
+      uint32_t wmask = c == UISA_CTL_SFC || c == UISA_CTL_DFC ? 0x7u
+                     : c == UISA_CTL_CACR ? 0x80008000u
+                     : c == UISA_CTL_TC ? 0xc000u
+                     : c >= UISA_CTL_ITT0 && c <= UISA_CTL_DTT1 ? 0xffffe364u
+                     : c == UISA_CTL_URP || c == UISA_CTL_SRP ? 0xfffffe00u : 0xffffffffu;
+      if (active) post.r[15] = pre.r[rn]; else post.ctl[c] = pre.r[rn] & wmask;
     } else {
       post.r[rn] = active ? pre.r[15] : pre.ctl[c];
     }

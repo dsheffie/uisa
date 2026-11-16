@@ -268,9 +268,9 @@ base_ops:
   - {name: gpcaddi, major: GPCADDI, fmt: I, asm: [rd, imm], imm_signed: true, unit: alu, sem: "r = GPC_INSN + b;", desc: "rd = guest instruction address + imm (return addresses, PC-relative operands)."}
   - {name: ret,     major: SYS, fn: 2,  fmt: S, asm: [], unit: br, cti: ret, sem: "npc = CSTACK_POP();", desc: "Return through the hardware millicode return stack. Underflow is a millicode fault."}
   - {name: csrr,    major: SYS, fn: 3,  fmt: S, asm: [rd, csr], unit: sys, sem: "r = CSR_READ(IMM);"}
-  - {name: csrw,    major: SYS, fn: 4,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, a);"}
-  - {name: csrs,    major: SYS, fn: 5,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, CSR_READ(IMM) | a);"}
-  - {name: csrc,    major: SYS, fn: 6,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, CSR_READ(IMM) & ~a);"}
+  - {name: csrw,    major: SYS, fn: 4,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, a & CSR_WMASK[IMM & 0xff]);"}
+  - {name: csrs,    major: SYS, fn: 5,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, (CSR_READ(IMM) | a) & CSR_WMASK[IMM & 0xff]);"}
+  - {name: csrc,    major: SYS, fn: 6,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, CSR_READ(IMM) & ~a & CSR_WMASK[IMM & 0xff]);"}
   - {name: unlock,  major: SYS, fn: 7,  fmt: S, asm: [], unit: mem, serialize: true, desc: "End a locked sequence without a store (failed CAS compare)."}
   - {name: fence,   major: SYS, fn: 8,  fmt: S, asm: [], unit: mem, serialize: true, desc: "Order all earlier memory accesses before all later ones."}
   - {name: tlbflush, major: SYS, fn: 9, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA.", sem: "MMU_FLUSH(a, IMM);"}
@@ -718,17 +718,17 @@ guest_ops:
 # ---------------------------------------------------------------------------
 csrs:
   - {num: 0x00, name: vbr,   desc: "68k vector base register."}
-  - {num: 0x01, name: sfc,   desc: "Source function code (galt loads)."}
-  - {num: 0x02, name: dfc,   desc: "Destination function code (galt stores and probes)."}
-  - {num: 0x03, name: cacr,  desc: "68040 cache control."}
-  - {num: 0x04, name: tc,    desc: "68040 MMU translation control."}
-  - {num: 0x05, name: itt0,  desc: "Instruction transparent translation 0."}
-  - {num: 0x06, name: itt1,  desc: "Instruction transparent translation 1."}
-  - {num: 0x07, name: dtt0,  desc: "Data transparent translation 0."}
-  - {num: 0x08, name: dtt1,  desc: "Data transparent translation 1."}
+  - {num: 0x01, name: sfc,   wmask: 0x00000007, desc: "Source function code (galt loads)."}
+  - {num: 0x02, name: dfc,   wmask: 0x00000007, desc: "Destination function code (galt stores and probes)."}
+  - {num: 0x03, name: cacr,  wmask: 0x80008000, desc: "68040 cache control."}
+  - {num: 0x04, name: tc,    wmask: 0x0000c000, desc: "68040 MMU translation control."}
+  - {num: 0x05, name: itt0,  wmask: 0xffffe364, desc: "Instruction transparent translation 0."}
+  - {num: 0x06, name: itt1,  wmask: 0xffffe364, desc: "Instruction transparent translation 1."}
+  - {num: 0x07, name: dtt0,  wmask: 0xffffe364, desc: "Data transparent translation 0."}
+  - {num: 0x08, name: dtt1,  wmask: 0xffffe364, desc: "Data transparent translation 1."}
   - {num: 0x09, name: mmusr, desc: "MMU status (PTEST result, from probe)."}
-  - {num: 0x0a, name: urp,   desc: "User root pointer."}
-  - {num: 0x0b, name: srp,   desc: "Supervisor root pointer."}
+  - {num: 0x0a, name: urp,   wmask: 0xfffffe00, desc: "User root pointer."}
+  - {num: 0x0b, name: srp,   wmask: 0xfffffe00, desc: "Supervisor root pointer."}
   - {num: 0x0c, name: usp,   desc: "Inactive user stack pointer."}
   - {num: 0x0d, name: isp,   desc: "Inactive interrupt stack pointer."}
   - {num: 0x0e, name: msp,   desc: "Inactive master stack pointer."}

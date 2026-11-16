@@ -9,7 +9,7 @@ index 31e9fc4..4c076ba 100644
 +# Optional uisa shadow functional model: cmake -DUISA_DIR=/path/to/uisa
 +# (run `make` in uisa first to generate build/uisa.h and build/uisa_flows.inc)
 +if(UISA_DIR)
-+	set(SOURCES ${SOURCES} ${UISA_DIR}/model/uisa_shadow.cc)
++	set(SOURCES ${SOURCES} ${UISA_DIR}/model/uisa_shadow.cc ${UISA_DIR}/model/uisa_machine.cc)
 +	include_directories(${UISA_DIR}/model ${UISA_DIR}/build)
 +	add_definitions(-DUISA_SHADOW)
 +endif()
