@@ -102,6 +102,7 @@ ops:
   SUBX: {src: read, dst: rmw, g: subx, template: alu}
   CMP: {src: read, dst: read, g: cmp, template: compare}
   CMPI: {src: read, dst: read, g: cmp, template: compare}
+  CMPM: {src: read, dst: read, g: cmp, template: compare}   # (Ay)+ is updated before (Ax)+ is read
   ADDQ:
     src: read
     dst: rmw
@@ -145,6 +146,9 @@ ops:
     any: ["st.32.pre.gd {EA}, -4(a7)"]
   MULU: {src: read, dst: rmw, any: ["mulu.16 {D}, {D}, {S}"]}
   MULS: {src: read, dst: rmw, any: ["muls.16 {D}, {D}, {S}"]}
+  # a zero divisor leaves Dn alone and traps (vector 5) after the instruction
+  DIVU: {src: read, dst: rmw, any: ["divu.16 {D}, {S}"]}
+  DIVS: {src: read, dst: rmw, any: ["divs.16 {D}, {S}"]}
   EXT:
     dst: rmw
     reg32: ["ext.32 {D}, {D}"]
@@ -180,6 +184,13 @@ ops:
   DBF:
     dst: rmw
     any: ["subi.16.nf {D}, 1", "addi {T}, {D}, 1", "zext16 {T}, {T}", "gbnz {T}, {disp_br}"]
+  # DBcc: when cc holds, Dn is unchanged and the instruction falls through;
+  # otherwise Dn.W -= 1 and it branches unless the old count was 0. Both
+  # choices are made with sel on cc, so the only branch is the guest branch.
+  DBcc:
+    dst: rmw
+    any: ["zext16 x28, {D}", "addi {T}, {D}, -1", "sel.{cc} {T}, {D}, {T}", "mrg16 {D}, {D}, {T}",
+          "sel.{cc} x28, x0, x28", "gbnz x28, {disp_br}"]
   RTS: {any: ["ld.32.gd {T}, 0(a7)", "addi a7, a7, 4", "gjr {T}, 0"]}
   JSR:
     src: addr
@@ -248,9 +259,6 @@ millicode:
   - PACK
   - UNPK
   - MOVEP
-  - CMPM
-  - DIVU
-  - DIVS
   - MULx
   - DIVx
   - BFTST
@@ -273,7 +281,6 @@ millicode:
   - CINV
   - CPUSH
   - MOVE16
-  - DBcc         # all DBcc other than DBF
   - TRAPcc
   - "MOVE to/from SR, CCR, USP"
   - "ORI/ANDI/EORI to CCR, SR"
@@ -322,6 +329,84 @@ bitfield:
     BFSET:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "addi {F}, x0, -1", "bfinsi {V}, {F}, {bf}"]}
     BFCHG:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "orn {F}, x0, {F}", "bfinsi {V}, {F}, {bf}"]}
     BFINS:  {write: true, body: ["bfextsi {F}, {Dx}, {bfi}", "mov.32 x0, {F}", "bfinsi {V}, {Dx}, {bf}"]}
+
+# MOVEC: a second-level decode on the extension word. The front end knows S
+# and M at decode (every write to them serializes), so in supervisor state it
+# issues one of these flows, chosen by the control register (the 16-way index
+# (code bit 11) << 3 | code bits 2:0; codes with bits 10:3 set, and code 802,
+# stay in millicode, which raises the illegal-instruction exception). In user
+# state the front end enters millicode, which raises the privilege violation.
+# {Rn} is the general register in extension bits 15:12 (D0-D7, A0-A7). ISP is
+# the active A7 while M = 0, and MSP while M = 1; the `active` forms are used
+# for whichever is active, and M = 1 stays in millicode.
+movec:
+  regs: [sfc, dfc, cacr, tc, itt0, itt1, dtt0, dtt1, usp, vbr, null, msp, isp, mmusr, urp, srp]
+  read: ["csrr {Rn}, {csr}"]
+  write: ["csrw {csr}, {Rn}"]
+  active_read: ["add {Rn}, a7, x0"]
+  active_write: ["add a7, {Rn}, x0"]
+
+# MOVE SR,Dn / MOVE Dn,SR / MOVE #imm,SR in supervisor state with M = 0
+# (known at decode, as for MOVEC; otherwise millicode). MOVE Dn,SR may leave
+# supervisor state, so its flow switches stacks without branches: with
+# S' = the new S bit, ISP' = S' ? ISP : A7 and A7' = S' ? A7 : USP. For
+# MOVE #imm,SR the front end sees the new S bit and picks `imm` (S stays 1)
+# or `imm_user` (S goes to 0); an immediate with M = 1 stays in millicode.
+# {Dn} is the data register in opword bits 2:0, {T} scratch.
+sr:
+  from_sr: ["rdccr {T}", "or {T}, {T}, gsr", "mrg16 {Dn}, {Dn}, {T}"]
+  to_sr: ["andi x28, {Dn}, 0x2000", "csrr x29, isp", "czeqz x29, x29, x28", "cznez x30, a7, x28",
+          "or x29, x29, x30", "csrr x31, usp", "cznez x31, x31, x28", "czeqz a7, a7, x28", "or a7, a7, x31",
+          "csrw isp, x29", "wrccr {Dn}", "andi gsr, {Dn}, 0xf700"]
+  imm: ["addi {T}, x0, {imm.W@2}", "wrccr {T}", "andi gsr, {T}, 0xf700"]
+  imm_user: ["addi {T}, x0, {imm.W@2}", "wrccr {T}", "andi gsr, {T}, 0xf700", "csrw isp, a7", "csrr a7, usp"]
+
+# MULU.L / MULS.L <ea>,Dl or <ea>,Dh:Dl: a second-level decode on the
+# extension word (offset 2; the operand's extension words follow at 4). The
+# front end picks the flow by extension bits 11:10 (signed, 64-bit result) and
+# substitutes {Dl} (bits 14:12) and {Dh} (bits 2:0). The 32-bit forms are one
+# guest multiply (V on overflow). The 64-bit forms compute both halves into
+# temps, then set N from the high half and Z from all 64 bits by testing
+# hi | (lo != 0) (V = C = 0, X kept), and write Dl then Dh, so Dh wins when
+# they are the same register, as in millicode.
+mull:
+  u32: ["mulu.32 {Dl}, {Dl}, {S}"]
+  s32: ["muls.32 {Dl}, {Dl}, {S}"]
+  u64: ["mul x29, {Dl}, {S}", "mulhu x31, {Dl}, {S}", "sltu x27, x0, x29", "or x27, x31, x27", "mov.32 x0, x27",
+        "add {Dl}, x29, x0", "add {Dh}, x31, x0"]
+  s64: ["mul x29, {Dl}, {S}", "mulh x31, {Dl}, {S}", "sltu x27, x0, x29", "or x27, x31, x27", "mov.32 x0, x27",
+        "add {Dl}, x29, x0", "add {Dh}, x31, x0"]
+
+# DIVU.L / DIVS.L <ea>,Dq and <ea>,Dr:Dq with a 32-bit dividend (extension
+# bit 10 clear; the 64-bit dividend stays in millicode). The front end picks
+# by bit 11 (signed) and whether Dr = Dq (quotient only), and substitutes
+# {Dq} (bits 14:12) and {Dr} (bits 2:0). A zero divisor makes the guest divide
+# leave its destination alone and flag the zero-divide trap, taken once the
+# instruction retires (so an (An)+ or -(An) update stands); DIVS.L overflow
+# (0x80000000 / -1) leaves it alone with V set. The base remainder ops do not
+# know either case, so Dr is selected branch-free: it keeps its old value when
+# k = 0, where k is the divisor, or (signed) zero on overflow too.
+divl:
+  u32: ["add x29, {Dq}, x0", "divu.32 x29, {S}", "remu x31, {Dq}, {S}", "czeqz x31, x31, {S}",
+        "cznez x27, {Dr}, {S}", "or {Dr}, x31, x27", "add {Dq}, x29, x0"]
+  s32: ["add x29, {Dq}, x0", "divs.32 x29, {S}", "rem x31, {Dq}, {S}", "addi x27, {S}, 1",
+        "xori x30, {Dq}, -0x80000000", "or x27, x27, x30", "czeqz x27, {S}, x27", "czeqz x31, x31, x27",
+        "cznez x27, {Dr}, x27", "or {Dr}, x31, x27", "add {Dq}, x29, x0"]
+  u32q: ["divu.32 {Dq}, {S}"]
+  s32q: ["divs.32 {Dq}, {S}"]
+
+# MOVES <ea>,Rn / Rn,<ea> in supervisor state (known at decode; user state
+# enters millicode, which raises the privilege violation). The front end picks
+# by extension bit 11 (Rn to memory) and bit 15 (An) and substitutes {Rn}
+# (bits 15:12); the EA's extension words follow at offset 4. The galt loads
+# and stores take their function code from SFC / DFC when they execute, so
+# the front end needs neither. Loads finish the An update before writing Rn
+# (so Rn wins when it is that An); stores copy Rn first (so the old value is
+# stored when Rn is the -(An) / (An)+ register). As in millicode, a byte or
+# word load merges into Dn and sign-extends into An.
+moves:
+  load_dn: {B: ["mrg8 {Rn}, {Rn}, {V}"], W: ["mrg16 {Rn}, {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
+  load_an: {B: ["sext8 {Rn}, {V}"], W: ["sext16 {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
 
 params:
   movem_regs: 5   # assumed registers per MOVEM for the uop estimate

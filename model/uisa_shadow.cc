@@ -32,7 +32,8 @@ struct uisa_fuop {
 enum { K_ILLEGAL, K_PLA, K_SEQUENCER, K_MILLICODE, K_UNMAPPED, K_NUM };
 enum { IK_CONST, IK_D16, IK_D8, IK_ABSW, IK_ABSL, IK_IMMB, IK_IMMW, IK_IMML, IK_BRW, IK_BRL, IK_PC16, IK_PC8,
        IK_BFB, IK_BFM1, IK_BFM2, IK_BFM3, IK_BFM4, IK_BFR, IK_BFI };
-enum { G_BFX = 60 };   // flow register: the data register in bits 14:12 of a bitfield extension word
+enum { G_XREG = 60,      // flow register: the register named by the extension word (bitfield Dx, MOVEC/MOVES Rn, MULx.L Dl, DIVx.L Dq)
+       G_XREG2 = 61 };    // MULx.L Dh, DIVx.L Dr (extension bits 2:0)
 enum { G_D = 32, G_A = 40, G_PC = 48, G_SR = 49 };   // guest registers in the uisa namespace
 
 // Outcomes of a shadowed instruction.
@@ -75,6 +76,11 @@ bool log_overflow;
 OpStats stats[65536];
 uint64_t kind_totals[K_NUM];
 uint64_t pla_uops_total;   // PLA uops issued (bitfield XSEL flows included)
+// millicode spacing: log2 histograms of the run of non-millicode instructions
+// before each millicode instruction (count, and instructions in such runs),
+// and of millicode flow length (count, and millicode words in such flows)
+uint64_t gap_run, gap_hist[40][2], mclen_hist[20][2], mc_by_op[65536];
+static int lg2(uint64_t v) { int b = 0; while (v > 1) { v >>= 1; b++; } return b; }
 uint64_t mc_insns_total, seq_uops_total;
 uint64_t exc_counts[256];   // exceptions the model took, by vector
 uint64_t mc_prof[sizeof MC_IMAGE / sizeof MC_IMAGE[0]];   // executions per millicode word
@@ -122,6 +128,7 @@ struct Machine {
   uint32_t cur_pc = 0, next_pc = 0;
   std::vector<uint32_t> cstack;
   bool done = false, raised = false;
+  unsigned trap_vec = 0;   // a trap a guest uop raised, taken once the instruction retires
   uint32_t vector = 0;
   uint32_t oracle_mmusr = 0;   // the host's MMUSR after the instruction (probe result)
   uint32_t mc_insns = 0;
@@ -313,6 +320,7 @@ struct Machine {
     } else if (o.gform != GF_NONE) {
       gop_out g = gop_eval(o.gfn, o.gsize_bits, a, b, X, N, Z, V, C);
       if (o.writes_rd) R[u.rd] = gop_writeback(o.gform, o.gsize_bits, R[u.rd], g.r);
+      if (g.T) trap_vec = g.T;
       if (o.flags_on) {
         if (o.writes_nzvc) { N = g.N; Z = g.Z; V = g.V; C = g.C; }
         if (o.writes_x) X = g.X;
@@ -555,27 +563,86 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   int kind = FLOW_KIND[cur_op];
   const uisa_fuop *flow = &FLOW_UOPS[FLOW_START[cur_op]];
   int flow_len = FLOW_LEN[cur_op];
-  uint32_t bfx = 0;
+  uint32_t xreg = 0, xreg2 = 0;
   if (XSEL_INDEX[cur_op] >= 0) {
     // second-level decode: a bitfield with immediate offset and width runs
     // one of the opword's XSEL flows, chosen by the bytes the field touches
     uint32_t e;
-    if (lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) && !(e & 0x820)) {
+    if ((cur_op & 0xf8c0) == 0xe8c0 && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) && !(e & 0x820)) {
       uint32_t o = (e >> 6) & 31, w = (e & 31) ? (e & 31) : 32, n = ((o & 7) + w + 7) >> 3;
       int v;
       if ((cur_op & 0x38) == 0) v = (o == 0 && w == 32) ? 4 : 0;
       else v = (w == 32 && (o & 7) == 0) ? 4 : n <= 4 ? (int)n - 1 : -1;
       if (v >= 0) {
-        int x = XSEL_INDEX[cur_op] * 5 + v;
+        int x = XSEL_INDEX[cur_op] * XSEL_NV + v;
         flow = &FLOW_UOPS[XSEL_START[x]];
         flow_len = XSEL_LEN[x];
         kind = K_PLA;
-        bfx = G_D + ((e >> 12) & 7);
+        xreg = G_D + ((e >> 12) & 7);
+      }
+    }
+    // MOVE SR,Dn and MOVE Dn,SR in supervisor state with M = 0; MOVE #imm,SR
+    // also needs M = 0 in the immediate, and picks by its S bit
+    bool sup = (pre.sr & 0x3000) == 0x2000;
+    int sv = -1;
+    if ((cur_op & 0xfff8) == 0x40c0 && (pre.sr & 0x2000)) sv = 0;
+    if ((cur_op & 0xfff8) == 0x46c0 && sup) sv = 0;
+    if (cur_op == 0x46fc && sup && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) && !(e & 0x1000)) sv = e & 0x2000 ? 0 : 1;
+    if (sv >= 0) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + sv;
+      flow = &FLOW_UOPS[XSEL_START[x]];
+      flow_len = XSEL_LEN[x];
+      kind = K_PLA;
+    }
+    // MULU.L / MULS.L: by extension bits 11:10 (signed, 64-bit result)
+    if ((cur_op & 0xffc0) == 0x4c00 && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e)) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + ((e >> 10) & 3);
+      flow = &FLOW_UOPS[XSEL_START[x]];
+      flow_len = XSEL_LEN[x];
+      kind = K_PLA;
+      xreg = G_D + ((e >> 12) & 7);
+      xreg2 = G_D + (e & 7);
+    }
+    // DIVU.L / DIVS.L with a 32-bit dividend: by bit 11 (signed), plus 4 when
+    // Dr = Dq (quotient only); a 64-bit dividend (bit 10) stays in millicode
+    if ((cur_op & 0xffc0) == 0x4c40 && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e)) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + (((e >> 10) & 3) | (((e >> 12) & 7) == (e & 7) ? 4 : 0));
+      if (XSEL_LEN[x]) {
+        flow = &FLOW_UOPS[XSEL_START[x]];
+        flow_len = XSEL_LEN[x];
+        kind = K_PLA;
+        xreg = G_D + ((e >> 12) & 7);
+        xreg2 = G_D + (e & 7);
+      }
+    }
+    // MOVES in supervisor state: load into Dn, load into An, or store
+    if ((cur_op & 0xff00) == 0x0e00 && (pre.sr & 0x2000) && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e)) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + (e & 0x800 ? 2 : e & 0x8000 ? 1 : 0);
+      flow = &FLOW_UOPS[XSEL_START[x]];
+      flow_len = XSEL_LEN[x];
+      kind = K_PLA;
+      xreg = G_D + ((e >> 12) & 15);
+    }
+    // MOVEC in supervisor state with M = 0: one flow per control register
+    if ((cur_op & 0xfffe) == 0x4e7a && sup && lookup(UISA_LOG_IFETCH, pre.pc + 2, 2, e) &&
+        !(e & 0x7f8)) {
+      int x = XSEL_INDEX[cur_op] * XSEL_NV + (((e >> 8) & 8) | (e & 7));
+      if (XSEL_LEN[x]) {
+        flow = &FLOW_UOPS[XSEL_START[x]];
+        flow_len = XSEL_LEN[x];
+        kind = K_PLA;
+        xreg = G_D + ((e >> 12) & 15);
       }
     }
   }
   kind_totals[kind]++;
   stats[cur_op].kind_count++;
+  if (kind == K_MILLICODE) {
+    int b = gap_run ? lg2(gap_run) + 1 : 0;
+    gap_hist[b][0]++;
+    gap_hist[b][1] += gap_run;
+    gap_run = 0;
+  } else gap_run++;
   if (log_overflow) return;
   if (kind == K_MILLICODE && MC_ENTRY[cur_op] < 0) { stats[cur_op].result[R_NATIVE]++; return; }
   if (kind != K_PLA && kind != K_SEQUENCER && kind != K_MILLICODE) return;
@@ -592,12 +659,24 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
       if (u[k].op == UISA_PSEUDO_IDX) m.scan_full(u[k].ioff);
     for (int k = 0; k < flow_len && m.fail == R_MATCH; k++) {
       uisa_fuop x = u[k];
-      if (x.rd == G_BFX) x.rd = (uint8_t)bfx;     // the front end's register substitution
-      if (x.rs1 == G_BFX) x.rs1 = (uint8_t)bfx;
-      if (x.rs2 == G_BFX) x.rs2 = (uint8_t)bfx;
+      if (x.rd == G_XREG) x.rd = (uint8_t)xreg;     // the front end's register substitution
+      if (x.rs1 == G_XREG) x.rs1 = (uint8_t)xreg;
+      if (x.rs2 == G_XREG) x.rs2 = (uint8_t)xreg;
+      if (x.rd == G_XREG2) x.rd = (uint8_t)xreg2;
+      if (x.rs1 == G_XREG2) x.rs1 = (uint8_t)xreg2;
+      if (x.rs2 == G_XREG2) x.rs2 = (uint8_t)xreg2;
       m.step(x);
     }
     model_pc = m.gnpc_set ? m.gnpc : pre.pc + ilen + m.full_extra;
+    if (m.fail == R_MATCH && m.trap_vec) {
+      // a trap (zero divide): the instruction has retired, so the exception
+      // stacks the next PC (and, in the format 2 frame, this instruction's)
+      m.R[G_PC] = model_pc;
+      m.raise(m.trap_vec);
+      m.run_from(MC_BASE + MC_EP_EXCEPTION);
+      mc_insns_total += m.mc_insns;
+      model_pc = m.R[G_PC];
+    }
   } else if (kind == K_SEQUENCER) {
     m.run_movem();
     model_pc = pre.pc + ilen + m.full_extra;
@@ -605,6 +684,10 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
     uint32_t bfe = (cur_op & 0xf8c0) == 0xe8c0 ? m.ext16_or_zero(2) : 0;   // before millicode reuses x2
     m.run_millicode((uint32_t)MC_ENTRY[cur_op], ilen);
     mc_insns_total += m.mc_insns;
+    mc_by_op[cur_op] += m.mc_insns;
+    int lb = m.mc_insns ? lg2(m.mc_insns) + 1 : 0;
+    mclen_hist[lb][0]++;
+    mclen_hist[lb][1] += m.mc_insns;
     if ((cur_op & 0xf8c0) == 0xe8c0) {
       uint32_t e = bfe;
       uint32_t key = ((cur_op >> 8) & 7) << 20 | ((cur_op >> 3) & 7) << 17 | (e & 0x800 ? 1 : 0) << 16 |
@@ -764,6 +847,12 @@ void uisa_shadow_dump(void) {
   }
   for (size_t i = 0; i < sizeof mc_prof / sizeof mc_prof[0]; i++)
     if (mc_prof[i]) fprintf(f, "# mcprof %zx %llu\n", i * 4, (unsigned long long)mc_prof[i]);
+  for (int b = 0; b < 40; b++)
+    if (gap_hist[b][0]) fprintf(f, "# gap %d %llu %llu\n", b, (unsigned long long)gap_hist[b][0], (unsigned long long)gap_hist[b][1]);
+  for (int b = 0; b < 20; b++)
+    if (mclen_hist[b][0]) fprintf(f, "# mclen %d %llu %llu\n", b, (unsigned long long)mclen_hist[b][0], (unsigned long long)mclen_hist[b][1]);
+  for (int op = 0; op < 65536; op++)
+    if (mc_by_op[op]) fprintf(f, "# mcop %04x %llu %llu\n", op, (unsigned long long)stats[op].kind_count, (unsigned long long)mc_by_op[op]);
   for (auto &kv : bf_census)
     fprintf(f, "# bf %x %llu %llu\n", kv.first, (unsigned long long)kv.second.first, (unsigned long long)kv.second.second);
   for (auto &kv : bf_pcs) if (kv.second >= 1000) fprintf(f, "# bfpc %08x %llu\n", kv.first, (unsigned long long)kv.second);

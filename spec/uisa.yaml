@@ -634,13 +634,14 @@ guest_ops:
     sizes: [16, 32]
     writes: [N, Z, V, C]
     sem: |
-      if (n == 16) {
+      if ((n == 16 ? (b & 0xffff) : b) == 0) { r = a; T = 5; }
+      else if (n == 16) {
         uint32_t d = b & 0xffff, q = a / d, rm = a % d;
         if (q > 0xffff) { r = a; V = 1; }
         else { r = (rm << 16) | q; V = 0; N = MSB(q, 16); Z = (q == 0); }
       } else { r = a / b; V = 0; N = MSB(r, 32); Z = (r == 0); }
       C = 0;
-    precondition: "divisor != 0 (millicode checks and raises the zero-divide exception first)"
+    trap: "zero divisor: rd, N, Z and V unchanged, C cleared, and the zero-divide trap (vector 5) taken once the instruction retires"
     desc: ".16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd, N and Z are unchanged, V is set and C cleared (as the 68040 does). .32: quotient only; remainder via base remu."
 
   - name: divs
@@ -649,14 +650,15 @@ guest_ops:
     sizes: [16, 32]
     writes: [N, Z, V, C]
     sem: |
-      if (n == 16) {
+      if ((n == 16 ? (b & 0xffff) : b) == 0) { r = a; T = 5; }
+      else if (n == 16) {
         int64_t d = SX(b, 16), q = (int64_t)(int32_t)a / d, rm = (int64_t)(int32_t)a % d;
         if (q > 32767 || q < -32768) { r = a; V = 1; }
         else { r = (((uint32_t)rm & 0xffff) << 16) | ((uint32_t)q & 0xffff); V = 0; N = MSB((uint32_t)q, 16); Z = (q == 0); }
       } else if (a == 0x80000000u && b == 0xffffffffu) { r = a; V = 1; }
       else { r = (uint32_t)((int32_t)a / (int32_t)b); V = 0; N = MSB(r, 32); Z = (r == 0); }
       C = 0;
-    precondition: "divisor != 0"
+    trap: "zero divisor: as divu"
 
   - name: ext
     fn: 27

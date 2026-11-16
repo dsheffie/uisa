@@ -340,6 +340,328 @@ static int random_bfread(int n, bool full_ok) {
 // front end's second-level decode sends each case where it should: immediate
 // offset and width (and, for memory, a field within 4 bytes; never BFFFO on
 // memory) to a PLA flow, everything else to millicode.
+// MOVEC Rc,Rn / Rn,Rc for every control register, D/A general registers and
+// both M states. In supervisor state with M = 0 the front end issues a PLA
+// flow; with M = 1 it enters millicode.
+static int random_movec(int n) {
+  static const int ctl[16] = {UISA_CTL_SFC, UISA_CTL_DFC, UISA_CTL_CACR, UISA_CTL_TC, UISA_CTL_ITT0, UISA_CTL_ITT1,
+                              UISA_CTL_DTT0, UISA_CTL_DTT1, UISA_CTL_USP, UISA_CTL_VBR, -1, UISA_CTL_MSP,
+                              UISA_CTL_ISP, UISA_CTL_MMUSR, UISA_CTL_URP, UISA_CTL_SRP};
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int v = rnd() % 16;
+    if (v == 10) continue;
+    bool write = rnd() & 1, m = rnd() % 8 == 0;
+    int rn = rnd() % 16;
+    uint16_t op = write ? 0x4e7b : 0x4e7a, code = (uint16_t)((v & 8) << 8 | (v & 7));
+    uint16_t ext = (uint16_t)(rn << 12 | code);
+    uisa_m68k_state pre = st(0x2600, (uint16_t)(0x2700 | (m ? 0x1000 : 0) | (rnd() & 0x1f)));
+    for (int r = 0; r < 16; r++) pre.r[r] = rnd_val();
+    for (int c = 0; c < UISA_CTL_NUM; c++) pre.ctl[c] = rnd_val();
+    uisa_m68k_state post = pre;
+    post.pc = 0x2604;
+    int c = ctl[v];
+    bool active = (c == UISA_CTL_ISP && !m) || (c == UISA_CTL_MSP && m);   // the active A7
+    if (write) {
+      if (active) post.r[15] = pre.r[rn]; else post.ctl[c] = pre.r[rn];
+    } else {
+      post.r[rn] = active ? pre.r[15] : pre.ctl[c];
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2602, 2, ext);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random movec", op, ext, 0);
+    if ((uisa_shadow_kind_total(1) != pla + 1) != m && bad++ < 5)
+      ref_fail(m ? "random movec: expected millicode" : "random movec: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
+// MOVE SR,Dn / MOVE Dn,SR / MOVE #imm,SR in supervisor state with M = 0,
+// including moves to user state (A7 becomes the USP, the ISP takes the old
+// A7). These all take PLA flows. (The new SR keeps M = 0 and T = 0.)
+static int random_sr(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 3, r = rnd() % 8;
+    uint16_t op = (uint16_t)(form == 0 ? 0x40c0 | r : form == 1 ? 0x46c0 | r : 0x46fc);
+    uisa_m68k_state pre = st(0x2800, (uint16_t)(0x2000 | (rnd() & 0x71f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    for (int c = 0; c < UISA_CTL_NUM; c++) pre.ctl[c] = rnd_val();
+    uint16_t nv = (uint16_t)((rnd() & 0x271f) | (rnd() % 4 ? 0x2000 : 0));
+    if (form == 1) pre.r[r] = (pre.r[r] & 0xffff0000) | nv;
+    uisa_m68k_state post = pre;
+    post.pc = form == 2 ? 0x2804 : 0x2802;
+    if (form == 0) {
+      post.r[r] = (pre.r[r] & 0xffff0000) | pre.sr;
+    } else {
+      post.sr = nv;
+      if (!(nv & 0x2000)) { post.ctl[UISA_CTL_ISP] = pre.r[15]; post.r[15] = pre.ctl[UISA_CTL_USP]; }
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    if (form == 2) uisa_shadow_log(UISA_LOG_IFETCH, 0x2802, 2, nv);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random sr", op, nv, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random sr: expected a PLA flow", op, nv, 0);
+  }
+  return bad;
+}
+
+// MULU.L / MULS.L, 32- and 64-bit results, over Dn, (A0), (A1)+, (d16,A1),
+// abs.L, #imm and (d16,PC), including Dh = Dl (the high half wins). All take
+// PLA flows.
+static int random_mull(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 7, dn = rnd() % 8;
+    static const uint16_t eas[7] = {0, 0x10, 0x19, 0x29, 0x39, 0x3c, 0x3a};
+    uint16_t op = (uint16_t)(0x4c00 | eas[form] | (form == 0 ? dn : 0));
+    bool sgn = rnd() & 1, wide = rnd() & 1;
+    int dl = rnd() % 8, dh = rnd() % 4 == 0 ? dl : rnd() % 8;
+    uint16_t ext = (uint16_t)(dl << 12 | (sgn ? 0x800 : 0) | (wide ? 0x400 : 0) | dh);
+    uisa_m68k_state pre = st(0x2a00, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    pre.r[8] = 0x10000;
+    pre.r[9] = 0x20000;
+    int16_t d16 = (int16_t)((int)(rnd() % 64) - 32) & ~3;
+    uint32_t mem = rnd_val(), addr = 0;
+    int ilen = 4;
+    switch (form) {
+      case 1: addr = pre.r[8]; break;
+      case 2: addr = pre.r[9]; break;
+      case 3: addr = pre.r[9] + d16; ilen = 6; break;
+      case 4: addr = 0x30000 + (rnd() % 64) * 4; ilen = 8; break;
+      case 5: ilen = 8; break;
+      case 6: addr = 0x2a04 + d16; ilen = 6; break;
+    }
+    uint32_t a = pre.r[dl], b = form == 0 ? pre.r[dn] : mem;
+    uisa_m68k_state post = pre;
+    if (form == 2) post.r[9] += 4;
+    uint64_t p = sgn ? (uint64_t)((int64_t)(int32_t)a * (int64_t)(int32_t)b) : (uint64_t)a * b;
+    uint32_t lo = (uint32_t)p, hi = (uint32_t)(p >> 32);
+    uint16_t ccr = pre.sr & 0x10;
+    if (wide) {
+      post.r[dl] = lo;
+      post.r[dh] = hi;
+      ccr |= (hi >> 31 ? 8 : 0) | (p == 0 ? 4 : 0);
+    } else {
+      post.r[dl] = lo;
+      bool v = sgn ? (int64_t)p != (int64_t)(int32_t)lo : hi != 0;
+      ccr |= (lo >> 31 ? 8 : 0) | (lo == 0 ? 4 : 0) | (v ? 2 : 0);
+    }
+    post.sr = (pre.sr & 0xff00) | ccr;
+    post.pc = 0x2a00 + ilen;
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2a02, 2, ext);
+    if (form == 3 || form == 6) uisa_shadow_log(UISA_LOG_IFETCH, 0x2a04, 2, (uint16_t)d16);
+    if (form == 4) { uisa_shadow_log(UISA_LOG_IFETCH, 0x2a04, 2, addr >> 16); uisa_shadow_log(UISA_LOG_IFETCH, 0x2a06, 2, addr & 0xffff); }
+    if (form == 5) { uisa_shadow_log(UISA_LOG_IFETCH, 0x2a04, 2, mem >> 16); uisa_shadow_log(UISA_LOG_IFETCH, 0x2a06, 2, mem & 0xffff); }
+    if (form != 0 && form != 5) uisa_shadow_log(UISA_LOG_READ, addr, 4, mem);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random mull", op, ext, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random mull: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
+// DIVU.L / DIVS.L with a 32-bit dividend on the PLA path: Dr = Dq or not,
+// over Dn, (A1)+, (d16,A1) and #imm, with signed overflow and zero divisors.
+// A zero divisor traps once the instruction retires: the (A1)+ update stands,
+// C is cleared, and vector 5 stacks a format 2 frame with the next PC.
+static int random_divl_pla(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 4, sreg = rnd() % 8;
+    static const uint16_t eas[4] = {0, 0x19, 0x29, 0x3c};
+    uint16_t op = (uint16_t)(0x4c40 | eas[form] | (form == 0 ? sreg : 0));
+    bool sgn = rnd() & 1;
+    int dq = rnd() % 8, dr = rnd() % 4 == 0 ? dq : rnd() % 8;
+    uint16_t ext = (uint16_t)(dq << 12 | (sgn ? 0x800 : 0) | dr);
+    uisa_m68k_state pre = st(0x2c00, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 8; k++) pre.r[k] = rnd_val();
+    pre.r[9] = 0x20000;
+    pre.r[15] = 0x8000;
+    pre.ctl[UISA_CTL_VBR] = 0x1000;
+    int16_t d16 = (int16_t)(((int)(rnd() % 64) - 32) & ~3);
+    uint32_t src = rnd_val(), addr = 0;
+    int ilen = 4;
+    if (form == 1) addr = pre.r[9];
+    if (form == 2) { addr = pre.r[9] + d16; ilen = 6; }
+    if (form == 3) ilen = 8;
+    int pick = rnd() % 8;
+    if (pick == 0) src = 0;
+    if (pick == 1 && sgn) { src = 0xffffffff; pre.r[dq] = 0x80000000; }
+    if (form == 0) { if (sreg == dq) src = pre.r[dq]; else pre.r[sreg] = src; }
+    uisa_m68k_state post = pre;
+    if (form == 1) post.r[9] += 4;
+    std::vector<std::pair<int, std::pair<uint32_t, uint32_t>>> w;   // stack writes: size, addr, value
+    uint32_t vec_read = 0;
+    if (src != 0) {
+      ref_divl(post, src, ext);
+      post.pc = 0x2c00 + ilen;
+    } else {
+      post.sr &= ~1;
+      w.push_back({2, {0x7ff4, post.sr}});
+      w.push_back({4, {0x7ff6, 0x2c00u + ilen}});
+      w.push_back({2, {0x7ffa, 0x2014}});
+      w.push_back({4, {0x7ffc, 0x2c00}});
+      post.r[15] = 0x7ff4;
+      post.pc = 0x6300;
+      vec_read = 0x6300;
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2c02, 2, ext);
+    if (form == 2) uisa_shadow_log(UISA_LOG_IFETCH, 0x2c04, 2, (uint16_t)d16);
+    if (form == 3) { uisa_shadow_log(UISA_LOG_IFETCH, 0x2c04, 2, src >> 16); uisa_shadow_log(UISA_LOG_IFETCH, 0x2c06, 2, src & 0xffff); }
+    if (form == 1 || form == 2) uisa_shadow_log(UISA_LOG_READ, addr, 4, src);
+    if (vec_read) uisa_shadow_log(UISA_LOG_READ, 0x1014, 4, vec_read);
+    for (auto &x : w) uisa_shadow_log(UISA_LOG_WRITE, x.second.first, x.first, x.second.second);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail(src ? "random divl pla" : "random divl pla (zero)", op, ext, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random divl pla: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
+// MOVES <ea>,Rn / Rn,<ea> in supervisor state, B/W/L, over (A0), (A1)+,
+// -(A1), (d16,A1) and abs.W, with Rn sometimes the EA's address register:
+// a load writes Rn after the An update, a store stores Rn's old value. A
+// byte or word load merges into Dn and sign-extends into An. All PLA flows.
+static int random_moves(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int form = rnd() % 5, sz = rnd() % 3, nb = 1 << sz;
+    static const uint16_t eas[5] = {0x10, 0x19, 0x21, 0x29, 0x38};
+    uint16_t op = (uint16_t)(0x0e00 | sz << 6 | eas[form]);
+    bool store = rnd() & 1;
+    int rn = rnd() % 4 == 0 ? (form == 0 ? 8 : 9) : rnd() % 16;
+    uint16_t ext = (uint16_t)(rn << 12 | (store ? 0x800 : 0));
+    uisa_m68k_state pre = st(0x2e00, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    pre.r[8] = 0x10000;
+    pre.r[9] = 0x20000 + (rnd() % 16) * 4;
+    pre.r[15] = 0x8000;
+    pre.ctl[UISA_CTL_SFC] = 1;
+    pre.ctl[UISA_CTL_DFC] = 1;
+    int16_t d16 = (int16_t)(((int)(rnd() % 64) - 32) & ~3);
+    uint32_t addr = 0;
+    int ilen = 4;
+    uisa_m68k_state post = pre;
+    switch (form) {
+      case 0: addr = pre.r[8]; break;
+      case 1: addr = pre.r[9]; post.r[9] += nb; break;
+      case 2: addr = pre.r[9] - nb; post.r[9] = addr; break;
+      case 3: addr = pre.r[9] + d16; ilen = 6; break;
+      case 4: addr = 0x3000 + (rnd() % 64) * 4; ilen = 6; break;
+    }
+    uint32_t m = nb == 4 ? 0xffffffffu : (1u << (8 * nb)) - 1, v = rnd_val() & m;
+    if (store) {
+      v = pre.r[rn] & m;
+    } else if (rn >= 8) {
+      post.r[rn] = nb == 1 ? (uint32_t)(int8_t)v : nb == 2 ? (uint32_t)(int16_t)v : v;
+    } else {
+      post.r[rn] = (pre.r[rn] & ~m) | v;
+    }
+    post.pc = 0x2e00 + ilen;
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x2e02, 2, ext);
+    if (form == 3) uisa_shadow_log(UISA_LOG_IFETCH, 0x2e04, 2, (uint16_t)d16);
+    if (form == 4) uisa_shadow_log(UISA_LOG_IFETCH, 0x2e04, 2, addr);
+    uisa_shadow_log(store ? UISA_LOG_WRITE : UISA_LOG_READ, addr, nb, v);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random moves", op, ext, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random moves: expected a PLA flow", op, ext, 0);
+  }
+  return bad;
+}
+
+// 68k condition code cc (0-15) on CCR flags
+static bool ref_cc(int cc, uint16_t ccr) {
+  bool c = ccr & 1, v = ccr & 2, z = ccr & 4, nf = ccr & 8;
+  switch (cc) {
+    case 0: return true;   case 1: return false;
+    case 2: return !c && !z; case 3: return c || z;
+    case 4: return !c;     case 5: return c;
+    case 6: return !z;     case 7: return z;
+    case 8: return !v;     case 9: return v;
+    case 10: return !nf;   case 11: return nf;
+    case 12: return nf == v; case 13: return nf != v;
+    case 14: return !z && nf == v; default: return z || nf != v;
+  }
+}
+
+// DBcc Dn,disp for every condition, flag state and count (0 and 0xffff
+// included): cc true falls through untouched; otherwise Dn.W -= 1 and the
+// branch is taken unless the old count was 0.
+static int random_dbcc(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int cc = rnd() % 16, r = rnd() % 8;
+    uint16_t op = (uint16_t)(0x50c8 | cc << 8 | r);
+    int16_t disp = (int16_t)(((int)(rnd() % 256) - 128) & ~1);
+    uisa_m68k_state pre = st(0x3000, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    int pick = rnd() % 4;
+    if (pick == 0) pre.r[r] &= 0xffff0000;
+    if (pick == 1) pre.r[r] |= 0xffff;
+    uisa_m68k_state post = pre;
+    post.pc = 0x3004;
+    if (!ref_cc(cc, pre.sr & 0x1f)) {
+      uint16_t cnt = (uint16_t)pre.r[r];
+      post.r[r] = (pre.r[r] & 0xffff0000) | (uint16_t)(cnt - 1);
+      if (cnt != 0) post.pc = 0x3002 + disp;
+    }
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x3002, 2, (uint16_t)disp);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random dbcc", op, (uint16_t)disp, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random dbcc: expected a PLA flow", op, 0, 0);
+  }
+  return bad;
+}
+
+// CMPM (Ay)+,(Ax)+ in B/W/L, including Ax = Ay (the second read is from the
+// incremented address) and A7 bytes (steps of 2). Flags of Ax-value - Ay-value.
+static int random_cmpm(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    int sz = rnd() % 3, nb = 1 << sz, ay = rnd() % 8, ax = rnd() % 4 == 0 ? ay : rnd() % 8;
+    uint16_t op = (uint16_t)(0xb108 | ax << 9 | sz << 6 | ay);
+    uisa_m68k_state pre = st(0x3200, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 8; k++) pre.r[k] = rnd_val();
+    for (int k = 8; k < 16; k++) pre.r[k] = 0x40000 + (uint32_t)(k - 8) * 0x1000 + (rnd() % 16) * 4;
+    int incy = (nb == 1 && ay == 7) ? 2 : nb, incx = (nb == 1 && ax == 7) ? 2 : nb;
+    uint32_t m = nb == 4 ? 0xffffffffu : (1u << (8 * nb)) - 1;
+    uint32_t sa = pre.r[8 + ay], da = (ax == ay ? sa + incy : pre.r[8 + ax]);
+    uint32_t sv = rnd_val() & m, dv = rnd() % 4 == 0 ? sv : rnd_val() & m;
+    uisa_m68k_state post = pre;
+    post.r[8 + ay] += incy;
+    post.r[8 + ax] = da + incx;
+    uint32_t res = (dv - sv) & m, sb = 1u << (8 * nb - 1);
+    uint16_t ccr = pre.sr & 0x10;
+    if (res & sb) ccr |= 8;
+    if (res == 0) ccr |= 4;
+    if (((dv ^ sv) & (dv ^ res)) & sb) ccr |= 2;
+    if (sv > dv) ccr |= 1;
+    post.sr = (pre.sr & 0xff00) | ccr;
+    post.pc = 0x3202;
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_READ, sa, nb, sv);
+    uisa_shadow_log(UISA_LOG_READ, da, nb, dv);
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) ref_fail("random cmpm", op, 0, 0);
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random cmpm: expected a PLA flow", op, 0, 0);
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -728,6 +1050,13 @@ int main() {
   fails += random_bfwrite(20000);
   fails += random_bfread(40000, BF_FULL_OK);
   fails += random_bfpath(40000);
+  fails += random_movec(20000);
+  fails += random_sr(20000);
+  fails += random_mull(40000);
+  fails += random_divl_pla(40000);
+  fails += random_moves(40000);
+  fails += random_dbcc(40000);
+  fails += random_cmpm(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;

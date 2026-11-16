@@ -24,6 +24,8 @@ word, see `bitfield:` in flows.yaml) also use:
   {bfw@k}                                the width operand of a BFI-format op; the
                                          descriptor before it already carries it
   {dx@k}                                 the data register in bits 14:12
+  {rn@k}                                 the general register in bits 15:12 (MOVEC)
+  {dh@k}                                 the data register in bits 2:0 (MULx.L Dh)
   {kind@k|bf}                            the reference plus offset / 8
   ...+N                                  any reference plus a constant
 """
@@ -47,7 +49,7 @@ SIZE_BITS = {"B": 8, "W": 16, "L": 32}
 SAMPLE = {"d16": "8", "d8": "4", "abs.W": "64", "abs.L": "64", "imm.B": "5", "imm.W": "5",
           "imm.L": "5", "br.W": "6", "br.L": "6", "pc16": "6", "pc8": "6", "xn": "d1",
           "bfb": "0", "bfm1": "8", "bfm2": "8", "bfm3": "8", "bfm4": "8", "bfr": "8", "bfi": "8",
-          "bfw": "8", "dx": "d1"}
+          "bfw": "8", "dx": "d1", "rn": "a1", "dh": "d2"}
 RUNTIME = re.compile(r"\{([A-Za-z0-9.]+)@(\d+)(?:\|bf)?\}(?:\+\d+)?")
 BF_OPS = ["BFTST", "BFEXTU", "BFCHG", "BFEXTS", "BFCLR", "BFFFO", "BFSET", "BFINS"]
 BF_MODES = {2: "(An)", 5: "(d16,An)", 6: "(d8,An,Xn)"}
@@ -111,6 +113,8 @@ class Expander:
                 return ("#q", None), (ins.dst, lo)
             return None, (ins.dst, lo)
         if line in (8, 9, 0xB, 0xC, 0xD):
+            if m == "CMPM":                     # CMPM (Ay)+,(Ax)+
+                return ("(An)+", lo), ("(An)+", hi)
             if m in ("ADDX", "SUBX"):
                 return (ins.src, lo), (ins.dst, hi)
             opm = (op >> 6) & 7
@@ -226,7 +230,7 @@ class Expander:
         if op >> 12 == 6:
             d = op & 0xFF
             b["{disp_br}"] = "{br.W@2}" if d == 0 else "{br.L@2}" if d == 0xFF else str(2 + sext8(d))
-        if key == "DBF":
+        if key in ("DBF", "DBcc"):
             b["{disp_br}"] = "{br.W@2}"
         if key == "LINK":
             b["{imm}"] = "{imm.%s@2}" % ("W" if ins.size == "W" else "L")
@@ -356,6 +360,116 @@ class Expander:
                 out["long"] = Flow("pla", self.peephole([self.subst(x, b2) for x in list(pre) + self.f["bitfield"]["load"][4] + body])) if body else out[4]
         return out
 
+    def movec_variants(self, op):
+        """Flows for MOVEC (4e7a read, 4e7b write) in supervisor state with M = 0,
+        keyed by the 16-way control-register index; None where millicode runs."""
+        if op not in (0x4E7A, 0x4E7B):
+            return None
+        mc = self.f["movec"]
+        rw = "write" if op & 1 else "read"
+        out = {}
+        for v, csr in enumerate(mc["regs"]):
+            if csr is None:
+                out[v] = None
+            elif csr == "isp":
+                out[v] = Flow("pla", [self.subst(x, {"{Rn}": "{rn@2}"}) for x in mc["active_" + rw]])
+            else:
+                out[v] = Flow("pla", [self.subst(x, {"{Rn}": "{rn@2}", "{csr}": csr}) for x in mc[rw]])
+        return out
+
+    def sr_variants(self, op):
+        """Supervisor-state (M = 0) flows for MOVE SR,Dn (40c0-40c7), MOVE Dn,SR
+        (46c0-46c7) and MOVE #imm,SR (46fc: [S stays 1, S goes to 0])."""
+        sr = self.f["sr"]
+        b = {"{T}": self.t["t4"], "{Dn}": "d%d" % (op & 7)}
+        def fl(key):
+            return Flow("pla", [self.subst(x, b) for x in sr[key]])
+        if op & 0xFFF8 == 0x40C0:
+            return [fl("from_sr")]
+        if op & 0xFFF8 == 0x46C0:
+            return [fl("to_sr")]
+        if op == 0x46FC:
+            return [fl("imm"), fl("imm_user")]
+        return None
+
+    def long_src(self, op):
+        """(uops, S) loading the 32-bit source of a MULx.L/DIVx.L opword, whose
+        operand extension words follow the extension word at offset 4; None
+        for an invalid source."""
+        src = (m68kdec.decode(op).src, op & 7)
+        if src[0] is None or src[0] == "An":
+            return None
+        t = self.t
+        if src[0] == "#imm":
+            return ["addi %s, x0, {imm.L@4}" % t["t0"]], t["t0"]
+        fpre, val, base, disp, post, mem = self.fragment("src", src, "L", t["t2"], t["t3"], 4)
+        if mem:
+            return fpre + [self.load("L", t["t0"], base, disp)] + post, t["t0"]
+        return [], val
+
+    def mull_variants(self, op):
+        """MULU.L/MULS.L flows indexed by extension bits 11:10 (u32, u64, s32, s64)."""
+        if op & 0xFFC0 != 0x4C00:
+            return None
+        ls = self.long_src(op)
+        if not ls:
+            return None
+        pre, S = ls
+        b = {"{Dl}": "{dx@2}", "{Dh}": "{dh@2}", "{S}": S}
+        m = self.f["mull"]
+        return [Flow("pla", self.peephole(pre + [self.subst(x, b) for x in m[k]])) for k in ("u32", "u64", "s32", "s64")]
+
+    def divl_variants(self, op):
+        """DIVU.L/DIVS.L flows indexed by extension bits 11:10 (signed, 64-bit
+        dividend) plus 4 when Dr = Dq; None entries (64-bit dividend) use millicode."""
+        if op & 0xFFC0 != 0x4C40:
+            return None
+        ls = self.long_src(op)
+        if not ls:
+            return None
+        pre, S = ls
+        b = {"{Dq}": "{dx@2}", "{Dr}": "{dh@2}", "{S}": S}
+        d = self.f["divl"]
+        def fl(k):
+            return Flow("pla", self.peephole(pre + [self.subst(x, b) for x in d[k]]))
+        return [fl("u32"), None, fl("s32"), None, fl("u32q"), None, fl("s32q"), None]
+
+    MOVES_MODES = ("(An)", "(An)+", "-(An)", "(d16,An)", "(d8,An,Xn)", "abs.W", "abs.L")
+
+    def moves_variants(self, op):
+        """MOVES flows in supervisor state: [load into Dn, load into An, store]."""
+        if op & 0xFF00 != 0x0E00 or (op >> 6) & 3 == 3:
+            return None
+        ins = m68kdec.decode(op)
+        if ins.mnem != "MOVES" or ins.dst not in self.MOVES_MODES:
+            return None
+        size, w = ins.size, {"B": 8, "W": 16, "L": 32}[ins.size]
+        t = self.t
+        pre, _, base, disp, post, _ = self.fragment("dst", (ins.dst, op & 7), size, t["t2"], t["t3"], 4)
+        mem = "%s(%s)" % (disp, base)
+        ld = "%s.ga %s, %s" % ({"B": "ld.8u", "W": "ld.16u", "L": "ld.32"}[size], t["t0"], mem)
+        m = self.f["moves"]
+        out = []
+        for key in ("load_dn", "load_an"):
+            body = [self.subst(x, {"{Rn}": "{rn@2}", "{V}": t["t0"]}) for x in m[key][size]]
+            out.append(Flow("pla", self.peephole(pre + [ld] + post + body)))
+        if ins.dst in ("(An)+", "-(An)"):   # Rn may be that An: store its old value
+            out.append(Flow("pla", ["add %s, {rn@2}, x0" % t["t1"]] + pre + ["st.%d.ga %s, %s" % (w, t["t1"], mem)] + post))
+        else:
+            out.append(Flow("pla", pre + ["st.%d.ga {rn@2}, %s" % (w, mem)] + post))
+        return out
+
+    def xsel_variants(self, op):
+        """Second-level-decode flows of an opword as a list indexed by variant
+        (None where millicode runs), or None if the opword has none."""
+        bf = self.bf_variants(op)
+        if bf:
+            return [bf[k] for k in (1, 2, 3, 4, "long")]
+        mv = self.movec_variants(op)
+        if mv:
+            return [mv[k] for k in range(16)]
+        return self.sr_variants(op) or self.mull_variants(op) or self.divl_variants(op) or self.moves_variants(op)
+
     @staticmethod
     def subst(line, b):
         for k, v in b.items():
@@ -426,6 +540,38 @@ def cmd_show(a):
                 print("          " + u)
             for e in check(spec, v):
                 print("   !! " + e)
+        for n, v in enumerate(ex.mull_variants(op) or []):
+            print("      %s: %d uops" % (("unsigned 32", "unsigned 64", "signed 32", "signed 64")[n], v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
+        for n, v in enumerate(ex.moves_variants(op) or []):
+            print("      S = 1, %s: %d uops" % (("<ea>,Dn", "<ea>,An", "Rn,<ea>")[n], v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
+        for n, v in enumerate(ex.divl_variants(op) or []):
+            if v:
+                print("      %s 32-bit dividend%s: %d uops" % ("signed" if n & 2 else "unsigned", ", quotient only" if n & 4 else "", v.count))
+                for u in v.uops:
+                    print("          " + u)
+                for e in check(spec, v):
+                    print("   !! " + e)
+        for n, v in enumerate(ex.sr_variants(op) or []):
+            what = ("; new S = 1", "; new S = 0")[n] if op == 0x46FC else ""
+            print("      S = 1, M = 0%s: %d uops" % (what, v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
+        mv = ex.movec_variants(op) or {}
+        for n, v in mv.items():
+            if v:
+                print("      %s (S = 1, M = 0): %s" % (ex.f["movec"]["regs"][n], "; ".join(v.uops)))
+                for e in check(spec, v):
+                    print("   !! " + e)
 
 
 def cmd_check(a):
@@ -435,8 +581,8 @@ def cmd_check(a):
         fl = ex.expand(op)
         kinds[fl.kind] += 1
         e = check(spec, fl) if fl.kind == "pla" else []
-        for v in (ex.bf_variants(op) or {}).values():
-            e += check(spec, v)
+        for v in ex.xsel_variants(op) or []:
+            e += check(spec, v) if v else []
         if True:
             if e:
                 form = m68kdec.decode(op).form()
