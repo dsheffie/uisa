@@ -1,4 +1,4 @@
-; Millicode for TAS, CAS and the 68040 cache and MMU instructions.
+; Millicode for TAS, CAS, CAS2 and the 68040 cache and MMU instructions.
 
 ; ---------------------------------------------------------------------------
 ; TAS <ea>: test a byte, then set its bit 7 (locked read-modify-write)
@@ -103,6 +103,87 @@ cas_b_ne:
         wrg     x8, x14
 cas_done:
         call    commit_an
+        jal     x0, exit
+
+; ---------------------------------------------------------------------------
+; CAS2 Dc1:Dc2,Du1:Du2,(Rn1):(Rn2) (word or long; opword bit 9 = long).
+; Extension words (x2): Rn in bits 15:12 (D0-A7), Du in 8:6, Dc in 2:0.
+; Both operands are read in one locked sequence. If both equal their Dc, Du1
+; is stored to (Rn1) and then Du2 to (Rn2); otherwise both operands are
+; loaded into Dc1 then Dc2 (low bits for .W) and nothing is stored. The flags
+; are those of the first compare that fails, or of the second.
+; Faults before commits: before the first real store, (Rn2) gets its own old
+; value back, so a write fault on either address happens before anything
+; changes (the loads already showed both readable). Guest registers and flags
+; change last.
+; ---------------------------------------------------------------------------
+cas2:
+        srli    x5, x1, 9
+        andi    x5, x5, 3               ; 2 = W, 3 = L
+        addi    x16, x0, 2
+        b.ltu   x5, x16, illegal        ; no CAS2.B
+        srli    x6, x2, 16              ; extension word 1
+        zext16  x7, x2                  ; extension word 2
+        srli    x8, x6, 12
+        rdg     x8, x8                  ; address 1
+        srli    x9, x7, 12
+        rdg     x9, x9                  ; address 2
+        andi    x10, x6, 7              ; Dc1
+        andi    x11, x7, 7              ; Dc2
+        srli    x12, x6, 6
+        andi    x12, x12, 7
+        rdg     x12, x12                ; Du1 value
+        srli    x13, x7, 6
+        andi    x13, x13, 7
+        rdg     x13, x13                ; Du2 value
+        rdg     x14, x10                ; Dc1 value
+        rdg     x15, x11                ; Dc2 value
+        b.eq    x5, x16, cas2_w
+        ldl.32.gd x17, 0(x8)
+        ld.32.gd x18, 0(x9)
+        b.ne    x17, x14, cas2_l_fail
+        b.ne    x18, x15, cas2_l_fail
+        st.32.gd x18, 0(x9)             ; (Rn2) is writable before anything changes
+        st.32.gd x12, 0(x8)
+        stu.32.gd x13, 0(x9)
+        cmp.32  x18, x15                ; Z
+        jal     x0, exit
+cas2_l_fail:
+        unlock
+        cmp.32  x17, x14
+        b.ne    x17, x14, cas2_l_dc
+        cmp.32  x18, x15
+cas2_l_dc:
+        wrg     x10, x17
+        wrg     x11, x18
+        jal     x0, exit
+cas2_w:
+        ldl.16.gd x17, 0(x8)
+        ld.16u.gd x18, 0(x9)
+        zext16  x19, x14
+        zext16  x20, x15
+        b.ne    x17, x19, cas2_w_fail
+        b.ne    x18, x20, cas2_w_fail
+        st.16.gd x18, 0(x9)             ; (Rn2) is writable before anything changes
+        st.16.gd x12, 0(x8)
+        stu.16.gd x13, 0(x9)
+        cmp.16  x18, x15                ; Z
+        jal     x0, exit
+cas2_w_fail:
+        unlock
+        cmp.16  x17, x14
+        b.ne    x17, x19, cas2_w_dc
+        cmp.16  x18, x15
+cas2_w_dc:
+        srli    x14, x14, 16            ; Dc1 keeps its upper word
+        slli    x14, x14, 16
+        or      x14, x14, x17
+        wrg     x10, x14
+        rdg     x15, x11                ; Dc2 again: it may be Dc1
+        srli    x15, x15, 16
+        slli    x15, x15, 16
+        or      x15, x15, x18
+        wrg     x11, x15
         jal     x0, exit
 
 ; ---------------------------------------------------------------------------

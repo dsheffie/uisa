@@ -725,6 +725,66 @@ static int random_cas(int n) {
   return bad;
 }
 
+// CAS2 Dc1:Dc2,Du1:Du2,(Rn1):(Rn2), word and long (millicode): address
+// registers among D0-A7 (possibly the same register, or the same address),
+// either compare failing, Dc1 = Dc2. A success stores Du1 then Du2; a failure
+// loads both operands into Dc1 then Dc2. The flags are the first failing
+// compare's, or the second's.
+static int random_cas2(int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    bool lng = rnd() & 1;
+    int nb = lng ? 4 : 2;
+    uint32_t m = lng ? 0xffffffffu : 0xffffu;
+    uint16_t op = lng ? 0x0efc : 0x0cfc;
+    int rn1 = rnd() % 16, rn2 = rnd() % 4 == 0 ? rn1 : rnd() % 16;
+    int dc1 = rnd() % 8, dc2 = rnd() % 5 == 0 ? dc1 : rnd() % 8, du1 = rnd() % 8, du2 = rnd() % 8;
+    uint16_t e1 = (uint16_t)(rn1 << 12 | du1 << 6 | dc1), e2 = (uint16_t)(rn2 << 12 | du2 << 6 | dc2);
+    uisa_m68k_state pre = st(0x3600, (uint16_t)(0x2700 | (rnd() & 0x1f)));
+    for (int k = 0; k < 16; k++) pre.r[k] = rnd_val();
+    // the address registers hold addresses (they may also be a Dc or Du)
+    pre.r[rn1] = 0x58000 + (rnd() % 64) * 4;
+    if (rn2 != rn1) pre.r[rn2] = rnd() % 4 == 0 ? pre.r[rn1] : 0x5c000 + (rnd() % 64) * 4;
+    uint32_t a1 = pre.r[rn1], a2 = pre.r[rn2];
+    uint32_t c1 = pre.r[dc1] & m, c2 = pre.r[dc2] & m;
+    uint32_t v1 = rnd() % 2 ? c1 : rnd_val() & m;
+    uint32_t v2 = a2 == a1 ? v1 : rnd() % 2 ? c2 : rnd_val() & m;
+    uisa_m68k_state post = pre;
+    post.pc = 0x3606;
+    auto flags = [&](uint32_t d, uint32_t sv) {
+      uint32_t res = (d - sv) & m, sb = 1u << (8 * nb - 1);
+      uint16_t ccr = pre.sr & 0x10;
+      if (res & sb) ccr |= 8;
+      if (res == 0) ccr |= 4;
+      if (((d ^ sv) & (d ^ res)) & sb) ccr |= 2;
+      if (sv > d) ccr |= 1;
+      return ccr;
+    };
+    bool ok = v1 == c1 && v2 == c2;
+    uint16_t ccr = v1 != c1 ? flags(v1, c1) : flags(v2, c2);
+    post.sr = (pre.sr & 0xff00) | ccr;
+    if (!ok) {
+      post.r[dc1] = (post.r[dc1] & ~m) | v1;
+      post.r[dc2] = (post.r[dc2] & ~m) | v2;
+    }
+    uint64_t before = uisa_shadow_count(op, 0);
+    uisa_shadow_pre(op, &pre);
+    uisa_shadow_log(UISA_LOG_IFETCH, 0x3602, 4, (uint32_t)e1 << 16 | e2);
+    uisa_shadow_log(UISA_LOG_READ, a1, nb, v1);
+    uisa_shadow_log(UISA_LOG_READ, a2, nb, v2);
+    if (ok) {
+      uisa_shadow_log(UISA_LOG_WRITE, a1, nb, pre.r[du1] & m);
+      uisa_shadow_log(UISA_LOG_WRITE, a2, nb, pre.r[du2] & m);
+    }
+    uisa_shadow_post(&post);
+    if (uisa_shadow_count(op, 0) != before + 1 && bad++ < 5) {
+      printf("  cas2: %s rn %d,%d dc %d,%d du %d,%d ok %d\n", lng ? "L" : "W", rn1, rn2, dc1, dc2, du1, du2, ok);
+      ref_fail("random cas2", op, e1, 0);
+    }
+  }
+  return bad;
+}
+
 static int random_bfpath(int n) {
   int bad = 0;
   const int kinds[4] = {0, 1, 3, 5};   // tst extu exts ffo
@@ -1121,6 +1181,7 @@ int main() {
   fails += random_dbcc(40000);
   fails += random_cmpm(40000);
   fails += random_cas(40000);
+  fails += random_cas2(40000);
   {  // deliberate mismatch: host says D1 is different
     Insn t{"move.l d0,d1 (bad host)", 0x2200, st(0x600, 0x2700), st(0x602, 0x2700), {}, 1};
     t.pre.r[0] = 5;
