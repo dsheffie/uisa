@@ -459,6 +459,24 @@ class Expander:
             out.append(Flow("pla", pre + ["st.%d.ga {rn@2}, %s" % (w, mem)] + post))
         return out
 
+    def cas_variants(self, op):
+        """CAS Dc,Du,<ea>: one flow around the cas uop for a memory-alterable
+        <ea>; other modes have none (millicode raises the illegal instruction)."""
+        if op & 0xF9C0 != 0x08C0 or (op >> 9) & 3 == 0:
+            return None
+        ins = m68kdec.decode(op)
+        if ins.mnem != "CAS" or ins.dst not in self.MOVES_MODES:
+            return None
+        size, w = ins.size, {"B": 8, "W": 16, "L": 32}[ins.size]
+        t = self.t
+        pre, _, base, disp, post, _ = self.fragment("dst", (ins.dst, op & 7), size, t["t2"], t["t3"], 4)
+        c = self.f["cas"]
+        b = {"{Dc}": "{dh@2}", "{Du}": "{dx@2}", "{V}": t["t0"]}
+        swap = [self.subst(x, b) for x in c["swap"]]
+        body = [self.subst(x, b) for x in c[size]]
+        cas = "cas.%d.gd %s, {dh@2}, %s(%s)" % (w, t["t0"], disp, base)
+        return [Flow("pla", self.peephole(swap + pre + [cas] + post + body))]
+
     def xsel_variants(self, op):
         """Second-level-decode flows of an opword as a list indexed by variant
         (None where millicode runs), or None if the opword has none."""
@@ -468,7 +486,8 @@ class Expander:
         mv = self.movec_variants(op)
         if mv:
             return [mv[k] for k in range(16)]
-        return self.sr_variants(op) or self.mull_variants(op) or self.divl_variants(op) or self.moves_variants(op)
+        return (self.sr_variants(op) or self.mull_variants(op) or self.divl_variants(op) or self.moves_variants(op)
+                or self.cas_variants(op))
 
     @staticmethod
     def subst(line, b):
@@ -548,6 +567,12 @@ def cmd_show(a):
                 print("   !! " + e)
         for n, v in enumerate(ex.moves_variants(op) or []):
             print("      S = 1, %s: %d uops" % (("<ea>,Dn", "<ea>,An", "Rn,<ea>")[n], v.count))
+            for u in v.uops:
+                print("          " + u)
+            for e in check(spec, v):
+                print("   !! " + e)
+        for v in ex.cas_variants(op) or []:
+            print("      memory-alterable <ea>: %d uops" % v.count)
             for u in v.uops:
                 print("          " + u)
             for e in check(spec, v):

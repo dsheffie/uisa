@@ -669,8 +669,8 @@ static int random_cmpm(int n) {
 }
 
 // CAS Dc,Du,<ea> for each size and memory-alterable mode, with equal and
-// unequal operands (millicode): an equal compare stores Du, an unequal one
-// loads the operand into Dc's low bits and stores nothing.
+// unequal operands (a PLA flow around the cas uop): an equal compare stores
+// Du, an unequal one loads the operand into Dc's low bits and stores nothing.
 static int random_cas(int n) {
   int bad = 0;
   for (int i = 0; i < n; i++) {
@@ -708,7 +708,7 @@ static int random_cas(int n) {
     post.sr = (pre.sr & 0xff00) | ccr;
     if (!eq) post.r[dc] = (pre.r[dc] & ~m) | v;
     post.pc = 0x3400 + (uint32_t)len;
-    uint64_t before = uisa_shadow_count(op, 0);
+    uint64_t before = uisa_shadow_count(op, 0), pla = uisa_shadow_kind_total(1);
     uisa_shadow_pre(op, &pre);
     uisa_shadow_log(UISA_LOG_IFETCH, 0x3402, 2, ext);
     if (form == 3 || form == 4) uisa_shadow_log(UISA_LOG_IFETCH, 0x3404, 2, form == 3 ? (uint16_t)d16 : ea);
@@ -720,6 +720,7 @@ static int random_cas(int n) {
       printf("  cas: size %d form %d dc %d du %d eq %d\n", nb, form, dc, du, eq);
       ref_fail("random cas", op, ext, 0);
     }
+    if (uisa_shadow_kind_total(1) != pla + 1 && bad++ < 5) ref_fail("random cas: expected a PLA flow", op, ext, 0);
   }
   return bad;
 }

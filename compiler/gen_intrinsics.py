@@ -48,6 +48,8 @@ def describe(spec, v):
         return None
     if v.mnemonic in ("lui", "auipc"):
         return None
+    if v.kind == "cas":                           # PLA-only (68k CAS); millicode uses ldl/stu
+        return None
     args, rng, tmpl = [], [], []
     has_result = spec.writes_rd(v)
     tied = -1

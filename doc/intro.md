@@ -94,9 +94,12 @@ guest program, or guest alternate (function code from SFC/DFC, for MOVES).
 The guest MMU can never produce a hidden address. Guest accesses may be
 misaligned; hardware may split them or take an invisible millicode assist.
 
-TAS, CAS and CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or
-`unlock` ends it. They execute non-speculatively at the head of the ROB. The
-machine is single-core, so locking only has to exclude DMA.
+CAS has its own operation, `cas.*`, a compare-and-swap like SPARC's CASA:
+it stores only if the operand equals the compare value and always returns
+the old operand, so CAS is a short PLA flow with nothing conditional. TAS and
+CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or `unlock` ends it.
+All of these execute non-speculatively at the head of the ROB. The machine is
+single-core, so locking only has to exclude DMA.
 
 Stores can write back their base register: `st.<w>.pre` stores to `rs1 + imm`
 and sets `rd` to that address, `st.<w>.post` stores to `rs1` and sets `rd` to

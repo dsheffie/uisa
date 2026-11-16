@@ -42,7 +42,7 @@ def facts(spec, v):
         reads_nzvc=int("nzvc" in v.reads_flags), reads_x=int("x" in v.reads_flags),
         writes_nzvc=int("nzvc" in v.writes_flags), writes_x=int("x" in v.writes_flags),
         serialize=int(bool(v.serialize)), tied=int(bool(v.tied)),
-        is_load=int(v.kind == "load"), is_store=int(v.kind == "store" or bool(v.attrs.get("store_bytes"))), is_probe=int(v.kind == "probe"),
+        is_load=int(v.kind in ("load", "cas")), is_store=int(v.kind in ("store", "cas") or bool(v.attrs.get("store_bytes"))), is_probe=int(v.kind == "probe"),
         lock_begin=int(v.attrs.get("locked") == "begin"), lock_end=int(v.attrs.get("locked") == "end"),
         load_signed=int(bool(v.attrs.get("signed"))), mem_bytes=v.attrs.get("bytes") or v.attrs.get("store_bytes") or 0,
         unit=UNITS.index(v.unit), cti=CTIS.index(v.cti),

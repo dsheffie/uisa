@@ -165,17 +165,23 @@ class Spec:
     def _expand_mem(self, ops):
         for op in ops:
             wb = op.get("writeback")
-            fmt = self.formats["MW" if wb else "M"]
+            cas = op["kind"] == "cas"
+            fmt = self.formats["MC" if cas else "MW" if wb else "M"]
             for sp in self.spaces:
                 fixed = {"op": self.majors[op["major"]], "sp": sp["code"]}
+                if "sz" in op:
+                    fixed["sz"] = op["sz"]
                 if wb:
                     operands = ["rs2", "mem"]    # data in rs2; rd = rs1 gets the new address
+                elif cas:
+                    operands = ["rd", "rs2", "mem"]   # rd: value to store in, old operand out; rs2: compare
                 else:
                     operands = ["rd", "mem"]     # loads: rd is the result; stores: rd carries the data
                 attrs = dict(kind=op["kind"], unit="mem", bytes=op["bytes"],
                              signed=op.get("signed", False), locked=op.get("locked"),
                              space=sp["name"], desc=op.get("desc", ""), sem=None, writeback=wb,
-                             cti=None, serialize=op.get("locked") is not None, tied=bool(wb),
+                             cti=None, serialize=op.get("locked") is not None or cas, tied=bool(wb),
+                             reads_rd=cas,
                              imm_signed=True, imm_max=None, reads_flags=[], writes_flags=[],
                              major=op["major"], family=op["name"])
                 self._add(Variant("%s.%s" % (op["name"], sp["suffix"]), fmt, fixed, operands, **attrs))

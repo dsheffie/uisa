@@ -223,6 +223,14 @@ void Machine::step(const uisa_fuop &u) {
   int space = SPACES.space[u.op];
   if (o.is_probe) {
     R[u.rd] = mem->probe(fc_space(space, true), a + immv, SPACES.probe_w[u.op]);
+  } else if (o.is_load && o.is_store) {         // cas: compare-and-swap (as SPARC CASA)
+    int fc = fc_space(space, true);
+    uint32_t addr = a + immv, n = o.mem_bytes;
+    uint32_t m = n == 4 ? 0xffffffffu : (1u << (8 * n)) - 1;
+    uint32_t old = load(fc, addr, (int)n);
+    if (fail != R_MATCH) return;
+    if (old == (R[u.rs2] & m)) store(fc, addr, (int)n, R[u.rd] & m);
+    R[u.rd] = old;
   } else if (o.is_load) {
     uint32_t addr = a + immv, v = load(fc_space(space, false), addr, o.mem_bytes);
     if (o.load_signed) v = (uint32_t)SX(v, 8 * o.mem_bytes);
@@ -477,7 +485,18 @@ Flow select_flow(uint16_t cur_op, uint16_t sr, uint32_t pc, Mem &mem) {
       f.xreg2 = G_D + (e & 7);
     }
   }
+  // CAS Dc,Du,<ea>: one flow; Du is extension bits 8:6, Dc bits 2:0
+  if ((cur_op & 0xf9c0) == 0x08c0 && mem.ifetch(pc + 2, 2, e)) {
+    int x = XSEL_INDEX[cur_op] * XSEL_NV;
+    if (XSEL_LEN[x]) {
+      pick(x);
+      f.xreg = G_D + ((e >> 6) & 7);
+      f.xreg2 = G_D + (e & 7);
+    }
+    return f;
+  }
   // MOVES in supervisor state: load into Dn, load into An, or store
+  // (size 3 in this opword range is CAS.L, above)
   if ((cur_op & 0xff00) == 0x0e00 && (sr & 0x2000) && mem.ifetch(pc + 2, 2, e)) {
     pick(XSEL_INDEX[cur_op] * XSEL_NV + (e & 0x800 ? 2 : e & 0x8000 ? 1 : 0));
     f.xreg = G_D + ((e >> 12) & 15);

@@ -98,13 +98,15 @@ formats:
   M:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[sp,13,12],[imm,11,0]], imm: {signed: true, scale: 1}}
   # stores with base-register writeback: rd is tied to rs1 and receives the updated address
   MW:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[sp,7,6],[imm,5,0]], imm: {signed: true, scale: 1}}
+  # compare-and-swap: rd is both the value stored and the result, rs2 the compare value
+  MC:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[sp,7,6],[sz,5,4],[imm,3,0]], imm: {signed: true, scale: 1}}
   S:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,8],[imm,7,0]], imm: {signed: false, scale: 1}}
   BFI: {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,12],[f,11,11],["off",10,6],[wid,5,1],[rsv,0,0]]}
   # guest control flow: displacements are bytes, relative to the guest instruction's address
   CG:  {fields: [[op,31,26],[cond,25,22],[imm,21,0]], imm: {signed: true, scale: 1}}
   BG:  {fields: [[op,31,26],[rs1,25,20],[cond,19,19],[imm,18,0]], imm: {signed: true, scale: 1}}
 
-# Major opcodes (bits 31:26). Unlisted values are reserved; 48..55 are held
+# Major opcodes (bits 31:26). Unlisted values are reserved; 48..54 are held
 # for a future FP extension.
 majors:
   ALU: 0
@@ -155,6 +157,7 @@ majors:
   GOPZN: 45
   GOPIN: 46
   GOPIZN: 47
+  CAS: 55
   GJR: 56
   GPUSHR: 57
   STPRE8: 58
@@ -304,6 +307,15 @@ mem_ops:
   - {name: stu.8,  major: STU8,  kind: store, bytes: 1, locked: end, desc: "Unlocking store: ends the atomic sequence."}
   - {name: stu.16, major: STU16, kind: store, bytes: 2, locked: end}
   - {name: stu.32, major: STU32, kind: store, bytes: 4, locked: end}
+  # Compare-and-swap (as SPARC CASA): an atomic read-modify-write of the
+  # operand at rs1 + imm. If it equals the low bytes of rs2, the low bytes of
+  # rd are stored there; either way rd gets the old operand, zero-extended.
+  # rd is read and written (the store value in, the old value out). Executes
+  # non-speculatively, like the locked loads. Function code: as a store (DFC
+  # for .ga).
+  - {name: cas.8,  major: CAS, sz: 0, kind: cas, bytes: 1, desc: "Compare-and-swap byte: if [rs1 + imm] == rs2[7:0], store rd[7:0]; rd = the old byte. Atomic (as SPARC CASA); 68k CAS on the PLA path."}
+  - {name: cas.16, major: CAS, sz: 1, kind: cas, bytes: 2}
+  - {name: cas.32, major: CAS, sz: 2, kind: cas, bytes: 4}
   - {name: probe.r, major: PROBER, kind: probe, bytes: 0, desc: "Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). The access would succeed if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga."}
   - {name: probe.w, major: PROBEW, kind: probe, bytes: 0, desc: "As probe.r, translating for a write."}
   # Stores with base writeback, for -(An) and (An)+ destinations and pushes.

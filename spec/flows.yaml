@@ -408,5 +408,19 @@ moves:
   load_dn: {B: ["mrg8 {Rn}, {Rn}, {V}"], W: ["mrg16 {Rn}, {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
   load_an: {B: ["sext8 {Rn}, {V}"], W: ["sext16 {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
 
+# CAS Dc,Du,<ea> with a memory-alterable <ea> (other modes enter millicode,
+# which raises the illegal instruction). The front end substitutes {Du}
+# (extension bits 8:6) and {Dc} (bits 2:0); the EA's extension words follow
+# at offset 4. One cas uop does the atomic compare-and-swap: {V} goes in as
+# Du and comes back as the old operand. The flags are CMP Dc,<ea>'s, and Dc
+# takes the old operand in its low bits, which leaves it unchanged when the
+# compare succeeded, so no uop is conditional. (An)+ / -(An) update as for any
+# memory operand; the flow retires atomically.
+cas:
+  swap: ["add {V}, {Du}, x0"]
+  B: ["cmp.8 {V}, {Dc}", "mov.8.nf {Dc}, {V}"]
+  W: ["cmp.16 {V}, {Dc}", "mov.16.nf {Dc}, {V}"]
+  L: ["cmp.32 {V}, {Dc}", "add {Dc}, {V}, x0"]
+
 params:
   movem_regs: 5   # assumed registers per MOVEM for the uop estimate

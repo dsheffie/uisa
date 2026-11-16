@@ -94,9 +94,12 @@ guest program, or guest alternate (function code from SFC/DFC, for MOVES).
 The guest MMU can never produce a hidden address. Guest accesses may be
 misaligned; hardware may split them or take an invisible millicode assist.
 
-TAS, CAS and CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or
-`unlock` ends it. They execute non-speculatively at the head of the ROB. The
-machine is single-core, so locking only has to exclude DMA.
+CAS has its own operation, `cas.*`, a compare-and-swap like SPARC's CASA:
+it stores only if the operand equals the compare value and always returns
+the old operand, so CAS is a short PLA flow with nothing conditional. TAS and
+CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or `unlock` ends it.
+All of these execute non-speculatively at the head of the ROB. The machine is
+single-core, so locking only has to exclude DMA.
 
 Stores can write back their base register: `st.<w>.pre` stores to `rs1 + imm`
 and sets `rd` to that address, `st.<w>.post` stores to `rs1` and sets `rd` to
@@ -170,7 +173,7 @@ GitHub; commit it together with the spec change that produced it.
 
 # Reference (generated)
 
-Spec version **0.1-draft**. 659 concrete instruction variants.
+Spec version **0.1-draft**. 671 concrete instruction variants.
 
 ## Parameters
 
@@ -216,6 +219,7 @@ Two renamed flag resources: `nzvc` (N Z V C), `x` (X).
 | GI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `sz[7:6]` `imm[5:0]` | unsigned |
 | M | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `imm[11:0]` | signed |
 | MW | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `imm[5:0]` | signed |
+| MC | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `sz[5:4]` `imm[3:0]` | signed |
 | S | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `imm[7:0]` | unsigned |
 | BFI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:12]` `f[11:11]` `off[10:6]` `wid[5:1]` `rsv[0:0]` |  |
 | CG | `op[31:26]` `cond[25:22]` `imm[21:0]` | signed |
@@ -233,7 +237,7 @@ Base ops can override immediate signedness (e.g. logical immediates are zero-ext
 | **24** | LD16U | LD16S | LD32 | ST8 | ST16 | ST32 | LDL8 | LDL16 |
 | **32** | LDL32 | STU8 | STU16 | STU32 | PROBER | PROBEW | SYS | BF |
 | **40** | BFI | GBCC | GBZ | GPCADDI | GOPN | GOPZN | GOPIN | GOPIZN |
-| **48** | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* |
+| **48** | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | CAS |
 | **56** | GJR | GPUSHR | STPRE8 | STPRE16 | STPRE32 | STPOST8 | STPOST16 | STPOST32 |
 
 ## Base operations
@@ -715,6 +719,9 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | `stu.8` | STU8 | store lock-end | 1 | Unlocking store: ends the atomic sequence. |
 | `stu.16` | STU16 | store lock-end | 2 |  |
 | `stu.32` | STU32 | store lock-end | 4 |  |
+| `cas.8` | CAS | cas | 1 | Compare-and-swap byte: if [rs1 + imm] == rs2[7:0], store rd[7:0]; rd = the old byte. Atomic (as SPARC CASA); 68k CAS on the PLA path. |
+| `cas.16` | CAS | cas | 2 |  |
+| `cas.32` | CAS | cas | 4 |  |
 | `probe.r` | PROBER | probe | 0 | Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). The access would succeed if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga. |
 | `probe.w` | PROBEW | probe | 0 | As probe.r, translating for a write. |
 | `st.8.pre` | STPRE8 | store | 1 |  |
