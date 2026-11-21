@@ -193,19 +193,25 @@ void legalize(Function *f) {
                 a[k] = Operand::reg(c->dst);
               }
             } else if (kind == 'm') {
+              // the instruction's displacement range (probes and the
+              // conditional loads and stores take fewer bits than MEM_LO..MEM_HI)
+              int dlo = i->in->range[k].lo, dhi = i->in->range[k].hi;
+              if (dlo == dhi) { dlo = MEM_LO; dhi = MEM_HI; }
+              int dbits = 1;
+              while ((1 << (dbits - 1)) - 1 < dhi) dbits++;
               i->disp = 0;
               if (a[k].isImm()) {
-                if (fits(a[k].imm, MEM_LO, MEM_HI)) {
+                if (fits(a[k].imm, dlo, dhi)) {
                   i->disp = a[k].imm;
                   a[k] = Operand::preg(0);
                 } else {
-                  int32_t lo = (a[k].imm << 20) >> 20;   // sign-extended low 12 bits
+                  int32_t lo = (int32_t)((uint32_t)a[k].imm << (32 - dbits)) >> (32 - dbits);   // sign-extended low dbits bits
                   a[k] = mat(a[k].imm - lo, i->line);
                   i->disp = lo;
                 }
               } else if (a[k].isReg() && a[k].r->def && a[k].r->def->op == Op::Add) {
                 Instr *d = a[k].r->def;
-                if (d->a[1].isImm() && fits(d->a[1].imm, MEM_LO, MEM_HI) &&
+                if (d->a[1].isImm() && fits(d->a[1].imm, dlo, dhi) &&
                     (d->a[0].isReg() || (d->a[0].k == Operand::Phys && d->a[0].phys == 0))) {
                   i->disp = d->a[1].imm;
                   a[k] = d->a[0];

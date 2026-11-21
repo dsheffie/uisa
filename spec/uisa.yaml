@@ -37,14 +37,42 @@ reg_classes:
   - {name: gpc,   base: 48, count: 1,  desc: "Guest PC. Holds the current instruction's address on millicode entry; millicode writes the next PC before gexit."}
   - {name: gsr,   base: 49, count: 1,  desc: "Guest SR system byte (T1 T0 S M - I2 I1 I0) in bits 15:8. The CCR byte lives in the renamed flags, not here."}
 
+# FP registers: a namespace of their own, named only by the fields an FP op
+# lists in `fp` (the same 6-bit specifiers; values 16-63 are reserved).
+fp_regs:
+  - {prefix: f, base: 0, count: 8, desc: "The guest's FP0-FP7, held as IEEE doubles (the 68881's 80-bit values are converted at the memory boundary: FMOVE.X, FMOVEM.X)."}
+  - {prefix: f, base: 8, count: 8, first: 8, desc: "Millicode FP temporaries f8-f15. Not preserved across gexit."}
+
 # Renamed flag resources. X is renamed separately from NZVC so that ops that
 # leave X alone (CMP, logic, MOVE) never depend on an older X producer.
 flags:
   - {name: nzvc, bits: [N, Z, V, C]}
   - {name: x,    bits: [X]}
+  # u: a millicode-private predicate. Probes with a .us/.ua suffix write it
+  # (the access they probed would succeed), the conditional loads and stores
+  # (ld.c, st.c, stu.c) and b.u/b.nu read it, so the scheduler cannot issue a
+  # conditional access before the probes that guard it: the ordering is a data
+  # dependence, not a branch. Renamed like nzvc and x, but never guest-visible:
+  # not in the CCR layout (rdccr/wrccr do not touch it), not saved or restored
+  # (millicode is not interruptible and u is dead at the end of a routine).
+  # In `sem`, uin is u before the op and U the u it writes.
+  - {name: u,    bits: [U]}
 ccr_layout: {X: 4, N: 3, Z: 2, V: 1, C: 0}   # bit positions for rdccr / wrccr
 
 sizes:  {0: 8, 1: 16, 2: 32}                 # sz field -> operand width
+
+# The success rule of a probe: the access it translated would succeed. mmusr
+# is the probe's result, w is set for probe.w, user for a user-mode access
+# (function code 1 or 2: gd/gp in user state, ga with DFC < 4), tce for
+# translation enabled (TC.E). With translation disabled and no transparent
+# translation register matching, the access is untranslated and always
+# succeeds although the MMUSR is 0 (as the 68040's PTEST leaves it): ok is
+# true. A TTR match (enabled or not) has T and R set, W from the TTR, so the
+# MMUSR rule decides it (a write-protecting TTR fails probe.w). With
+# translation enabled an MMUSR of 0 is an invalid descriptor (fails). The
+# .us/.ua probe forms write ok to u. In the C subset of `sem` (tools/gen.py
+# emits it as PROBE_OK, tools/gen_smt.py symbolically).
+probe_ok: "(!tce && mmusr == 0) || (((mmusr & 3) != 0) && !((mmusr >> 11) & 1) && !(w && ((mmusr >> 2) & 1)) && !(user && ((mmusr >> 7) & 1)))"
 
 spaces:
   - {code: 0, suffix: h,  name: hidden,  desc: "Physical, untranslated. Hidden memory and devices. The guest MMU can never produce these addresses."}
@@ -96,6 +124,12 @@ formats:
   G:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[fn,7,2],[sz,1,0]]}
   GI:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,8],[sz,7,6],[imm,5,0]], imm: {signed: false, scale: 1}}
   M:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[sp,13,12],[imm,11,0]], imm: {signed: true, scale: 1}}
+  # probes: um selects what the probe does to u (0 nothing, 1 .us set, 2 .ua and; 3 reserved)
+  MP:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[sp,13,12],[um,11,10],[imm,9,0]], imm: {signed: true, scale: 1}}
+  # conditional loads: lk = 0 8u, 1 8s, 2 16u, 3 16s, 4 32 (5-7 reserved)
+  MCL: {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[sp,13,12],[lk,11,9],[imm,8,0]], imm: {signed: true, scale: 1}}
+  # conditional stores: data in rd (as st.N); sz = 0 8, 1 16, 2 32 (3 reserved); ul = 1 unlocking (stu.c)
+  MCS: {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[sp,13,12],[sz,11,10],[ul,9,9],[imm,8,0]], imm: {signed: true, scale: 1}}
   # stores with base-register writeback: rd is tied to rs1 and receives the updated address
   MW:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[sp,7,6],[imm,5,0]], imm: {signed: true, scale: 1}}
   # compare-and-swap: rd is both the value stored and the result, rs2 the compare value
@@ -106,8 +140,8 @@ formats:
   CG:  {fields: [[op,31,26],[cond,25,22],[imm,21,0]], imm: {signed: true, scale: 1}}
   BG:  {fields: [[op,31,26],[rs1,25,20],[cond,19,19],[imm,18,0]], imm: {signed: true, scale: 1}}
 
-# Major opcodes (bits 31:26). Unlisted values are reserved; 48..54 are held
-# for a future FP extension.
+# Major opcodes (bits 31:26). Unlisted values are reserved; 49..52 are held
+# for the FP extension's future (48 is its first major).
 majors:
   ALU: 0
   ADDI: 1
@@ -157,6 +191,9 @@ majors:
   GOPZN: 45
   GOPIN: 46
   GOPIZN: 47
+  FP: 48          # floating point (fp_regs; fn selects)
+  STC: 53         # conditional stores (st.c, stu.c), on u
+  LDC: 54         # conditional loads (ld.c), on u
   CAS: 55
   GJR: 56
   GPUSHR: 57
@@ -173,116 +210,149 @@ majors:
 # ---------------------------------------------------------------------------
 base_ops:
   # --- register-register ALU (major ALU, fn selects) ---
-  - {name: add,    major: ALU, fn: 0,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + b;"}
-  - {name: sub,    major: ALU, fn: 1,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a - b;"}
-  - {name: and,    major: ALU, fn: 2,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a & b;"}
-  - {name: or,     major: ALU, fn: 3,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a | b;"}
-  - {name: xor,    major: ALU, fn: 4,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a ^ b;"}
-  - {name: andn,   major: ALU, fn: 5,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a & ~b;"}
-  - {name: orn,    major: ALU, fn: 6,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a | ~b;"}
-  - {name: sll,    major: ALU, fn: 7,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a << (b & 31);"}
-  - {name: srl,    major: ALU, fn: 8,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a >> (b & 31);"}
-  - {name: sra,    major: ALU, fn: 9,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (uint32_t)((int32_t)a >> (b & 31));"}
-  - {name: rol,    major: ALU, fn: 10, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = ROL32(a, b & 31);"}
-  - {name: ror,    major: ALU, fn: 11, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = ROL32(a, (32 - (b & 31)) & 31);"}
-  - {name: slt,    major: ALU, fn: 12, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (int32_t)a < (int32_t)b;"}
-  - {name: sltu,   major: ALU, fn: 13, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a < b;"}
-  - {name: min,    major: ALU, fn: 14, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (int32_t)a < (int32_t)b ? a : b;"}
-  - {name: max,    major: ALU, fn: 15, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (int32_t)a > (int32_t)b ? a : b;"}
-  - {name: minu,   major: ALU, fn: 16, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a < b ? a : b;"}
-  - {name: maxu,   major: ALU, fn: 17, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a > b ? a : b;"}
-  - {name: mul,    major: ALU, fn: 18, fmt: R, asm: [rd, rs1, rs2], unit: mul, sem: "r = a * b;"}
-  - {name: mulh,   major: ALU, fn: 19, fmt: R, asm: [rd, rs1, rs2], unit: mul, sem: "r = (uint32_t)(((int64_t)(int32_t)a * (int64_t)(int32_t)b) >> 32);"}
-  - {name: mulhu,  major: ALU, fn: 20, fmt: R, asm: [rd, rs1, rs2], unit: mul, sem: "r = (uint32_t)(((uint64_t)a * (uint64_t)b) >> 32);"}
-  - {name: div,    major: ALU, fn: 21, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? 0xffffffffu : ((a == 0x80000000u && b == 0xffffffffu) ? a : (uint32_t)((int32_t)a / (int32_t)b));", note: "Never faults. Division by zero returns all ones."}
-  - {name: divu,   major: ALU, fn: 22, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? 0xffffffffu : a / b;", note: "Never faults."}
-  - {name: rem,    major: ALU, fn: 23, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? a : ((a == 0x80000000u && b == 0xffffffffu) ? 0 : (uint32_t)((int32_t)a % (int32_t)b));"}
-  - {name: remu,   major: ALU, fn: 24, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? a : a % b;"}
-  - {name: clz,    major: ALU, fn: 25, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a ? __builtin_clz(a) : 32;"}
-  - {name: ctz,    major: ALU, fn: 26, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a ? __builtin_ctz(a) : 32;"}
-  - {name: cpop,   major: ALU, fn: 27, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = __builtin_popcount(a);"}
-  - {name: rev8,   major: ALU, fn: 28, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = __builtin_bswap32(a);"}
-  - {name: sext8,  major: ALU, fn: 29, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = (uint32_t)SX(a, 8);"}
-  - {name: sext16, major: ALU, fn: 30, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = (uint32_t)SX(a, 16);"}
-  - {name: zext8,  major: ALU, fn: 31, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a & 0xffu;"}
-  - {name: zext16, major: ALU, fn: 32, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a & 0xffffu;"}
-  - {name: czeqz,  major: ALU, fn: 33, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (b == 0) ? 0 : a;", desc: "Conditional zero (branch-free select building block)."}
-  - {name: cznez,  major: ALU, fn: 34, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (b != 0) ? 0 : a;"}
-  - {name: mrg8,   major: ALU, fn: 35, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (a & ~0xffu) | (b & 0xffu);", desc: "Explicit byte merge: upper 24 bits from rs1, low byte from rs2."}
-  - {name: mrg16,  major: ALU, fn: 36, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (a & ~0xffffu) | (b & 0xffffu);"}
-  - {name: rdccr,  major: ALU, fn: 37, fmt: R, asm: [rd], unit: alu, reads_flags: [nzvc, x], sem: "r = CCR_PACK(xin, nin, zin, vin, cin);", desc: "Copy the renamed flags into a register (CCR layout)."}
-  - {name: wrccr,  major: ALU, fn: 38, fmt: R, asm: [rs1], unit: alu, writes_flags: [nzvc, x], sem: "CCR_UNPACK(a, X, N, Z, V, C);", desc: "Load the renamed flags from a register (CCR layout)."}
-  - {name: rdg,    major: ALU, fn: 39, fmt: R, asm: [rd, rs1], unit: alu, serialize: true, sem: "r = GREG_READ(a & 31);", desc: "Read guest register g[rs1 & 31] (namespace index 32 + n). Index is data, so rename serializes."}
-  - {name: wrg,    major: ALU, fn: 40, fmt: R, asm: [rs1, rs2], unit: alu, serialize: true, sem: "GREG_WRITE(a & 31, b);", desc: "Write rs2 to guest register g[rs1 & 31]. Serializes."}
-  - {name: sh1add, major: ALU, fn: 42, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 1);", desc: "Scaled-index add (68k (d8,An,Xn*2))."}
-  - {name: sh2add, major: ALU, fn: 43, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 2);"}
-  - {name: sh3add, major: ALU, fn: 44, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 3);"}
-  - {name: bfmask, major: ALU, fn: 41, fmt: R, asm: [rd, rs2], unit: alu, sem: "r = BF_MASK(b);", desc: "Mask of the 68k bitfield described by rs2 (offset in bits 4:0 from the MSB, width in bits 9:5, 0 means 32), wrapping like a register bitfield."}
+  - {name: add, title: "Add",    major: ALU, fn: 0,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + b;"}
+  - {name: sub, title: "Subtract",    major: ALU, fn: 1,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a - b;"}
+  - {name: and, title: "And",    major: ALU, fn: 2,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a & b;"}
+  - {name: or, title: "Or",     major: ALU, fn: 3,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a | b;"}
+  - {name: xor, title: "Exclusive Or",    major: ALU, fn: 4,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a ^ b;"}
+  - {name: andn, title: "And Not",   major: ALU, fn: 5,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a & ~b;"}
+  - {name: orn, title: "Or Not",    major: ALU, fn: 6,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a | ~b;"}
+  - {name: sll, title: "Shift Left Logical",    major: ALU, fn: 7,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a << (b & 31);"}
+  - {name: srl, title: "Shift Right Logical",    major: ALU, fn: 8,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a >> (b & 31);"}
+  - {name: sra, title: "Shift Right Arithmetic",    major: ALU, fn: 9,  fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (uint32_t)((int32_t)a >> (b & 31));"}
+  - {name: rol, title: "Rotate Left",    major: ALU, fn: 10, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = ROL32(a, b & 31);"}
+  - {name: ror, title: "Rotate Right",    major: ALU, fn: 11, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = ROL32(a, (32 - (b & 31)) & 31);"}
+  - {name: slt, title: "Set on Less Than",    major: ALU, fn: 12, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (int32_t)a < (int32_t)b;"}
+  - {name: sltu, title: "Set on Less Than Unsigned",   major: ALU, fn: 13, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a < b;"}
+  - {name: min, title: "Minimum",    major: ALU, fn: 14, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (int32_t)a < (int32_t)b ? a : b;"}
+  - {name: max, title: "Maximum",    major: ALU, fn: 15, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (int32_t)a > (int32_t)b ? a : b;"}
+  - {name: minu, title: "Minimum Unsigned",   major: ALU, fn: 16, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a < b ? a : b;"}
+  - {name: maxu, title: "Maximum Unsigned",   major: ALU, fn: 17, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a > b ? a : b;"}
+  - {name: mul, title: "Multiply",    major: ALU, fn: 18, fmt: R, asm: [rd, rs1, rs2], unit: mul, sem: "r = a * b;"}
+  - {name: mulh, title: "Multiply High",   major: ALU, fn: 19, fmt: R, asm: [rd, rs1, rs2], unit: mul, sem: "r = (uint32_t)(((int64_t)(int32_t)a * (int64_t)(int32_t)b) >> 32);"}
+  - {name: mulhu, title: "Multiply High Unsigned",  major: ALU, fn: 20, fmt: R, asm: [rd, rs1, rs2], unit: mul, sem: "r = (uint32_t)(((uint64_t)a * (uint64_t)b) >> 32);"}
+  - {name: div, title: "Divide",    major: ALU, fn: 21, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? 0xffffffffu : ((a == 0x80000000u && b == 0xffffffffu) ? a : (uint32_t)((int32_t)a / (int32_t)b));", note: "Never faults. Division by zero returns all ones."}
+  - {name: divu, title: "Divide Unsigned",   major: ALU, fn: 22, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? 0xffffffffu : a / b;", note: "Never faults."}
+  - {name: rem, title: "Remainder",    major: ALU, fn: 23, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? a : ((a == 0x80000000u && b == 0xffffffffu) ? 0 : (uint32_t)((int32_t)a % (int32_t)b));"}
+  - {name: remu, title: "Remainder Unsigned",   major: ALU, fn: 24, fmt: R, asm: [rd, rs1, rs2], unit: div, sem: "r = (b == 0) ? a : a % b;"}
+  - {name: clz, title: "Count Leading Zeros",    major: ALU, fn: 25, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a ? __builtin_clz(a) : 32;"}
+  - {name: ctz, title: "Count Trailing Zeros",    major: ALU, fn: 26, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a ? __builtin_ctz(a) : 32;"}
+  - {name: cpop, title: "Population Count",   major: ALU, fn: 27, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = __builtin_popcount(a);"}
+  - {name: rev8, title: "Byte Reverse",   major: ALU, fn: 28, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = __builtin_bswap32(a);"}
+  - {name: sext8, title: "Sign-Extend 8-bit",  major: ALU, fn: 29, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = (uint32_t)SX(a, 8);"}
+  - {name: sext16, title: "Sign-Extend 16-bit", major: ALU, fn: 30, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = (uint32_t)SX(a, 16);"}
+  - {name: zext8, title: "Zero-Extend 8-bit",  major: ALU, fn: 31, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a & 0xffu;"}
+  - {name: zext16, title: "Zero-Extend 16-bit", major: ALU, fn: 32, fmt: R, asm: [rd, rs1], unit: alu, sem: "r = a & 0xffffu;"}
+  - {name: czeqz, title: "Conditional Zero on Zero",  major: ALU, fn: 33, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (b == 0) ? 0 : a;", desc: "Conditional zero (branch-free select building block)."}
+  - {name: cznez, title: "Conditional Zero on Nonzero",  major: ALU, fn: 34, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (b != 0) ? 0 : a;"}
+  - {name: mrg8, title: "Merge 8-bit",   major: ALU, fn: 35, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (a & ~0xffu) | (b & 0xffu);", desc: "Explicit byte merge: upper 24 bits from rs1, low byte from rs2."}
+  - {name: mrg16, title: "Merge 16-bit",  major: ALU, fn: 36, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = (a & ~0xffffu) | (b & 0xffffu);"}
+  - {name: rdccr, title: "Read Condition Codes",  major: ALU, fn: 37, fmt: R, asm: [rd], unit: alu, reads_flags: [nzvc, x], sem: "r = CCR_PACK(xin, nin, zin, vin, cin);", desc: "Copy the renamed flags into a register (CCR layout)."}
+  - {name: wrccr, title: "Write Condition Codes",  major: ALU, fn: 38, fmt: R, asm: [rs1], unit: alu, writes_flags: [nzvc, x], sem: "CCR_UNPACK(a, X, N, Z, V, C);", desc: "Load the renamed flags from a register (CCR layout)."}
+  - {name: rdg, title: "Read Guest Register",    major: ALU, fn: 39, fmt: R, asm: [rd, rs1], unit: alu, serialize: true, sem: "r = GREG_READ(a & 31);", desc: "Read guest register g[rs1 & 31] (namespace index 32 + n): D0-D7, A0-A7, gpc, gsr are 0-17. An index of 18-31 is a millicode fault (registers 50-63 are not reachable). Index is data, so rename serializes."}
+  - {name: wrg, title: "Write Guest Register",    major: ALU, fn: 40, fmt: R, asm: [rs1, rs2], unit: alu, serialize: true, sem: "GREG_WRITE(a & 31, b);", desc: "Write rs2 to guest register g[rs1 & 31], 0-17 as rdg; an index of 18-31 is a millicode fault and writes nothing. Serializes."}
+  - {name: sh1add, title: "Shift Left 1 and Add", major: ALU, fn: 42, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 1);", desc: "Scaled-index add (68k (d8,An,Xn*2))."}
+  - {name: sh2add, title: "Shift Left 2 and Add", major: ALU, fn: 43, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 2);"}
+  - {name: sh3add, title: "Shift Left 3 and Add", major: ALU, fn: 44, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = a + (b << 3);"}
+  - {name: bfmask, title: "Bitfield Mask", major: ALU, fn: 41, fmt: R, asm: [rd, rs2], unit: alu, sem: "r = BF_MASK(b);", desc: "Mask of the 68k bitfield described by rs2 (offset in bits 4:0 from the MSB, width in bits 9:5, 0 means 32), wrapping like a register bitfield."}
 
   # --- guest-condition select / set (read NZVC) ---
-  - {family: sel, major: ALU, fn_base: 0x40, per_cond: guest, fmt: R, asm: [rd, rs1, rs2], unit: alu, reads_flags: [nzvc], sem: "r = COND ? a : b;", desc: "rd = cond ? rs1 : rs2, on the guest condition."}
-  - {family: s,   major: ALU, fn_base: 0x50, per_cond: guest, fmt: R, asm: [rd], unit: alu, reads_flags: [nzvc], sem: "r = COND ? 0xffffffffu : 0;", desc: "rd = cond ? all ones : 0 (Scc building block; follow with mov.8 to merge)."}
+  - {family: sel, title: "Select on Guest Condition", major: ALU, fn_base: 0x40, per_cond: guest, fmt: R, asm: [rd, rs1, rs2], unit: alu, reads_flags: [nzvc], sem: "r = COND ? a : b;", desc: "rd = cond ? rs1 : rs2, on the guest condition."}
+  - {family: s, title: "Set on Guest Condition",   major: ALU, fn_base: 0x50, per_cond: guest, fmt: R, asm: [rd], unit: alu, reads_flags: [nzvc], sem: "r = COND ? 0xffffffffu : 0;", desc: "rd = cond ? all ones : 0 (Scc building block; follow with mov.8 to merge)."}
 
   # --- register-immediate ---
-  - {name: addi,  major: ADDI,  fmt: I, asm: [rd, rs1, imm], imm_signed: true,  unit: alu, sem: "r = a + b;"}
-  - {name: andi,  major: ANDI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, unit: alu, sem: "r = a & b;", note: "Immediate is zero-extended."}
-  - {name: ori,   major: ORI,   fmt: I, asm: [rd, rs1, imm], imm_signed: false, unit: alu, sem: "r = a | b;", note: "Immediate is zero-extended."}
-  - {name: xori,  major: XORI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, unit: alu, sem: "r = a ^ b;", note: "Immediate is zero-extended."}
-  - {name: slti,  major: SLTI,  fmt: I, asm: [rd, rs1, imm], imm_signed: true,  unit: alu, sem: "r = (int32_t)a < (int32_t)b;"}
-  - {name: sltiu, major: SLTIU, fmt: I, asm: [rd, rs1, imm], imm_signed: true,  unit: alu, sem: "r = a < b;"}
-  - {name: slli,  major: SLLI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = a << (b & 31);"}
-  - {name: srli,  major: SRLI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = a >> (b & 31);"}
-  - {name: srai,  major: SRAI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = (uint32_t)((int32_t)a >> (b & 31));"}
-  - {name: rori,  major: RORI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = ROL32(a, (32 - (b & 31)) & 31);"}
-  - {name: lui,   major: LUI,   fmt: U, asm: [rd, imm], imm_signed: false, unit: alu, sem: "r = b << 12;"}
-  - {name: auipc, major: AUIPC, fmt: U, asm: [rd, imm], imm_signed: false, unit: alu, sem: "r = pc + (b << 12);"}
+  - {name: addi, title: "Add Immediate",  major: ADDI,  fmt: I, asm: [rd, rs1, imm], imm_signed: true,  unit: alu, sem: "r = a + b;"}
+  - {name: andi, title: "And Immediate",  major: ANDI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, unit: alu, sem: "r = a & b;", note: "Immediate is zero-extended."}
+  - {name: ori, title: "Or Immediate",   major: ORI,   fmt: I, asm: [rd, rs1, imm], imm_signed: false, unit: alu, sem: "r = a | b;", note: "Immediate is zero-extended."}
+  - {name: xori, title: "Exclusive Or Immediate",  major: XORI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, unit: alu, sem: "r = a ^ b;", note: "Immediate is zero-extended."}
+  - {name: slti, title: "Set on Less Than Immediate",  major: SLTI,  fmt: I, asm: [rd, rs1, imm], imm_signed: true,  unit: alu, sem: "r = (int32_t)a < (int32_t)b;"}
+  - {name: sltiu, title: "Set on Less Than Immediate Unsigned", major: SLTIU, fmt: I, asm: [rd, rs1, imm], imm_signed: true,  unit: alu, sem: "r = a < b;"}
+  - {name: slli, title: "Shift Left Logical Immediate",  major: SLLI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = a << (b & 31);"}
+  - {name: srli, title: "Shift Right Logical Immediate",  major: SRLI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = a >> (b & 31);"}
+  - {name: srai, title: "Shift Right Arithmetic Immediate",  major: SRAI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = (uint32_t)((int32_t)a >> (b & 31));"}
+  - {name: rori, title: "Rotate Right Immediate",  major: RORI,  fmt: I, asm: [rd, rs1, imm], imm_signed: false, imm_max: 31, unit: alu, sem: "r = ROL32(a, (32 - (b & 31)) & 31);"}
+  - {name: lui, title: "Load Upper Immediate",   major: LUI,   fmt: U, asm: [rd, imm], imm_signed: false, unit: alu, sem: "r = b << 12;"}
+  - {name: auipc, title: "Add Upper Immediate to PC", major: AUIPC, fmt: U, asm: [rd, imm], imm_signed: false, unit: alu, sem: "r = pc + (b << 12);"}
 
   # --- millicode control flow ---
-  - {name: jal,  major: JAL,  fmt: J, asm: [rd, imm], unit: br, cti: jump, sem: "r = pc + 4; npc = pc + b;"}
-  - {name: jalr, major: JALR, fmt: I, asm: [rd, rs1, imm], imm_signed: true, unit: br, cti: jump_ind, sem: "r = pc + 4; npc = (a + b) & ~3u;"}
-  - {name: call, major: CALL, fmt: L, asm: [imm], unit: br, cti: call, sem: "CSTACK_PUSH(pc + 4); npc = pc + b;", desc: "Push the return address on the hardware millicode return stack. Overflow is a millicode fault."}
-  - {family: b, major: BR, per_cond: base, fmt: B, asm: [rs1, rs2, imm], unit: br, cti: branch, sem: "if (COND) npc = pc + IMM;", desc: "Compare two registers and branch. Millicode control flow; never reads guest flags."}
-  - {family: bcc, major: BCC, per_cond: guest, fmt: C, asm: [imm], unit: br, cti: branch, reads_flags: [nzvc], sem: "if (COND) npc = pc + b;", desc: "Branch on a guest condition."}
+  - {name: jal, title: "Jump and Link",  major: JAL,  fmt: J, asm: [rd, imm], unit: br, cti: jump, sem: "r = pc + 4; npc = pc + b;"}
+  - {name: jalr, title: "Jump and Link Register", major: JALR, fmt: I, asm: [rd, rs1, imm], imm_signed: true, unit: br, cti: jump_ind, sem: "r = pc + 4; npc = (a + b) & ~3u;"}
+  - {name: call, title: "Call", major: CALL, fmt: L, asm: [imm], unit: br, cti: call, sem: "CSTACK_PUSH(pc + 4); npc = pc + b;", desc: "Push the return address on the hardware millicode return stack. Overflow is a millicode fault."}
+  - {family: b, title: "Branch", major: BR, per_cond: base, fmt: B, asm: [rs1, rs2, imm], unit: br, cti: branch, sem: "if (COND) npc = pc + IMM;", desc: "Compare two registers and branch. Millicode control flow; never reads guest flags."}
+  - {name: b.u, title: "Branch on Predicate", major: BR, cond: 6, fmt: B, asm: [imm], unit: br, cti: branch, reads_flags: [u], sem: "if (uin) npc = pc + IMM;", desc: "Branch if the millicode predicate u is set. Encoded in the BR major with cond 6; the rs1 and rs2 fields are zero (the assembler writes zeros; the decoder ignores them). The register compare branches never read u."}
+  - {name: b.nu, title: "Branch on Not Predicate", major: BR, cond: 7, fmt: B, asm: [imm], unit: br, cti: branch, reads_flags: [u], sem: "if (!uin) npc = pc + IMM;", desc: "Branch if the millicode predicate u is clear (a probe failed): BR with cond 7, rs1 = rs2 = 0 as b.u."}
+  - {family: bcc, title: "Branch on Guest Condition", major: BCC, per_cond: guest, fmt: C, asm: [imm], unit: br, cti: branch, reads_flags: [nzvc], sem: "if (COND) npc = pc + b;", desc: "Branch on a guest condition."}
 
   # --- bitfields on registers (68k semantics: offset counts from the MSB, register fields wrap) ---
-  - {name: bfextu, major: BF, fn: 0, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = BF_EXTU(a, b);", desc: "Extract the field described by rs2 (offset 4:0, width 9:5), zero-extended."}
-  - {name: bfexts, major: BF, fn: 1, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = BF_EXTS(a, b);"}
-  - {name: bfffo,  major: BF, fn: 2, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = BF_FFO(a, b);", desc: "Offset of the first 1 bit in the field, or offset+width if none (68k BFFFO)."}
-  - {name: bfextui, major: BFI, fn: 0, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, sem: "r = BF_EXTU(a, b);"}
-  - {name: bfextsi, major: BFI, fn: 1, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, sem: "r = BF_EXTS(a, b);"}
-  - {name: bfinsi,  major: BFI, fn: 2, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, reads_rd: true, sem: "r = BF_INS(OLD, a, b);", desc: "Insert the low wid bits of rs1 into the field of rd. rd is also a source (old value), so the op reads rd and rs1."}
-  - {name: bx,      major: BFI, fn: 3, fmt: BFI, asm: [rs1, "off", wid], unit: br, cti: jump_ind, sem: "npc = pc + 4 + (((a >> BF_OFF(b)) & ((1u << BF_WID(b)) - 1u)) << 2);", desc: "Indexed branch (n-way dispatch): take the wid-bit field of rs1 starting at bit off (counted from the LSB here, 1 <= wid <= 15) as an index into a table of one-instruction slots that follows the bx, usually jal to each case. Predicted like an indirect jump."}
+  - {name: bfextu, title: "Bitfield Extract Unsigned", major: BF, fn: 0, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = BF_EXTU(a, b);", desc: "Extract the field described by rs2 (offset 4:0, width 9:5), zero-extended."}
+  - {name: bfexts, title: "Bitfield Extract Signed", major: BF, fn: 1, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = BF_EXTS(a, b);"}
+  - {name: bfffo, title: "Bitfield Find First One",  major: BF, fn: 2, fmt: R, asm: [rd, rs1, rs2], unit: alu, sem: "r = BF_FFO(a, b);", desc: "Offset of the first 1 bit in the field, or offset+width if none (68k BFFFO)."}
+  - {name: bfextui, title: "Bitfield Extract Unsigned Immediate", major: BFI, fn: 0, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, sem: "r = BF_EXTU(a, b);"}
+  - {name: bfextsi, title: "Bitfield Extract Signed Immediate", major: BFI, fn: 1, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, sem: "r = BF_EXTS(a, b);"}
+  - {name: bfinsi, title: "Bitfield Insert Immediate",  major: BFI, fn: 2, fmt: BFI, asm: [rd, rs1, "off", wid], unit: alu, reads_rd: true, sem: "r = BF_INS(OLD, a, b);", desc: "Insert the low wid bits of rs1 into the field of rd. rd is also a source (old value), so the op reads rd and rs1."}
+  - {name: bx, title: "Indexed Branch",      major: BFI, fn: 3, fmt: BFI, asm: [rs1, "off", wid], unit: br, cti: jump_ind, sem: "npc = pc + 4 + (((a >> BF_OFF(b)) & MSK(BF_WID(b))) << 2);", desc: "Indexed branch (n-way dispatch): take the wid-bit field of rs1 starting at bit off (counted from the LSB here, 1 <= wid <= 15) as an index into a table of one-instruction slots that follows the bx, usually jal to each case. Predicted like an indirect jump."}
 
   # --- system (major SYS, fn selects; imm8 operand) ---
-  - {name: gexit,   major: SYS, fn: 0,  fmt: S, asm: [], unit: sys, cti: gexit, desc: "End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc."}
-  - {name: gfault,  major: SYS, fn: 1,  fmt: S, asm: [imm], unit: sys, cti: gfault, desc: "Raise guest exception vector imm8. Transfers to the exception entry point."}
-  - {name: gfaultr, major: SYS, fn: 16, fmt: S, asm: [rs1], unit: sys, cti: gfault, desc: "Raise the guest exception whose vector is in rs1 (TRAP #n, computed vectors)."}
+  - {name: gexit, title: "Guest Exit",   major: SYS, fn: 0,  fmt: S, asm: [], unit: sys, cti: gexit, desc: "End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc."}
+  - {name: gfault, title: "Guest Fault",  major: SYS, fn: 1,  fmt: S, asm: [imm], unit: sys, cti: gfault, desc: "Raise guest exception vector imm8. Transfers to the exception entry point."}
+  - {name: gfaultr, title: "Guest Fault Register", major: SYS, fn: 16, fmt: S, asm: [rs1], unit: sys, cti: gfault, desc: "Raise the guest exception whose vector is in rs1 (TRAP #n, computed vectors)."}
 
   # --- guest control flow. These set the guest next-PC; the change takes effect
   # when the guest instruction ends (end of a PLA flow, or gexit), so the rest of
   # the flow still executes. GPC_INSN is the current guest instruction's address.
-  - {family: gbcc, major: GBCC, per_cond: guest, fmt: CG, asm: [imm], unit: br, cti: gbranch, reads_flags: [nzvc], sem: "if (COND) GNPC_SET(GPC_INSN + b);", desc: "Guest conditional branch (Bcc, BRA via gbcc.t)."}
-  - {name: gbz,     major: GBZ, cond: 0, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a == 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is zero."}
-  - {name: gbnz,    major: GBZ, cond: 1, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a != 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is nonzero (DBF)."}
-  - {name: gjr,     major: GJR, fmt: I, asm: [rs1, imm], imm_signed: true, unit: br, cti: gjump, sem: "GNPC_SET(a + b);", desc: "Guest jump to rs1 + imm (JMP, JSR, RTS). gjr x0, abs jumps to an absolute address."}
-  - {name: gpushr,  major: GPUSHR, fmt: I, asm: [rd, imm], tied: true, imm_signed: true, unit: mem, store_bytes: 4,
+  - {family: gbcc, title: "Guest Branch on Condition", major: GBCC, per_cond: guest, fmt: CG, asm: [imm], unit: br, cti: gbranch, reads_flags: [nzvc], sem: "if (COND) GNPC_SET(GPC_INSN + b);", desc: "Guest conditional branch (Bcc, BRA via gbcc.t)."}
+  - {name: gbz, title: "Guest Branch if Zero",     major: GBZ, cond: 0, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a == 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is zero."}
+  - {name: gbnz, title: "Guest Branch if Nonzero",    major: GBZ, cond: 1, fmt: BG, asm: [rs1, imm], unit: br, cti: gbranch, sem: "if (a != 0) GNPC_SET(GPC_INSN + b);", desc: "Guest branch if rs1 is nonzero (DBF)."}
+  - {name: gjr, title: "Guest Jump Register",     major: GJR, fmt: I, asm: [rs1, imm], imm_signed: true, unit: br, cti: gjump, sem: "GNPC_SET(a + b);", desc: "Guest jump to rs1 + imm (JMP, JSR, RTS). gjr x0, abs jumps to an absolute address."}
+  - {name: gpushr, title: "Guest Push Return Address",  major: GPUSHR, fmt: I, asm: [rd, imm], tied: true, imm_signed: true, unit: mem, store_bytes: 4,
      sem: "GSTORE(GDATA, a - 4, 4, GPC_INSN + b); r = a - 4;",
      desc: "Push a return address: mem[rd - 4] = guest instruction address + imm (its length); rd = rd - 4. One register source and one result (rd is tied to rs1); the data is an immediate. A speculative store whose register result is ready at address generation."}
-  - {name: gpcaddi, major: GPCADDI, fmt: I, asm: [rd, imm], imm_signed: true, unit: alu, sem: "r = GPC_INSN + b;", desc: "rd = guest instruction address + imm (return addresses, PC-relative operands)."}
-  - {name: ret,     major: SYS, fn: 2,  fmt: S, asm: [], unit: br, cti: ret, sem: "npc = CSTACK_POP();", desc: "Return through the hardware millicode return stack. Underflow is a millicode fault."}
-  - {name: csrr,    major: SYS, fn: 3,  fmt: S, asm: [rd, csr], unit: sys, sem: "r = CSR_READ(IMM);"}
-  - {name: csrw,    major: SYS, fn: 4,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, a & CSR_WMASK[IMM & 0xff]);"}
-  - {name: csrs,    major: SYS, fn: 5,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, (CSR_READ(IMM) | a) & CSR_WMASK[IMM & 0xff]);"}
-  - {name: csrc,    major: SYS, fn: 6,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, CSR_READ(IMM) & ~a & CSR_WMASK[IMM & 0xff]);"}
-  - {name: unlock,  major: SYS, fn: 7,  fmt: S, asm: [], unit: mem, serialize: true, sem: "/* ends the locked sequence; no functional effect */", desc: "End a locked sequence without a store (failed CAS compare)."}
-  - {name: fence,   major: SYS, fn: 8,  fmt: S, asm: [], unit: mem, serialize: true, desc: "Order all earlier memory accesses before all later ones."}
-  - {name: tlbflush, major: SYS, fn: 9, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA.", sem: "MMU_FLUSH(a, IMM);"}
-  - {name: cpush,   major: SYS, fn: 10, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1.", sem: "CACHE_OP(a, IMM, 1);"}
-  - {name: cinv,    major: SYS, fn: 11, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Invalidate without write back. Same imm encoding as cpush.", sem: "CACHE_OP(a, IMM, 0);"}
-  - {name: irqack,  major: SYS, fn: 12, fmt: S, asm: [rd, rs1], unit: sys, serialize: true, desc: "Acknowledge the interrupt at level rs1; rd = vector (autovector if none supplied)."}
-  - {name: stop,    major: SYS, fn: 13, fmt: S, asm: [], unit: sys, serialize: true, desc: "Wait for an interrupt (68k STOP, after millicode has loaded SR)."}
-  - {name: halt,    major: SYS, fn: 14, fmt: S, asm: [imm], unit: sys, serialize: true, desc: "Stop the machine (simulation / debug). imm is a status code."}
-  - {name: brk,     major: SYS, fn: 15, fmt: S, asm: [imm], unit: sys, serialize: true, desc: "Debug breakpoint."}
+  - {name: gpcaddi, title: "Guest PC Add Immediate", major: GPCADDI, fmt: I, asm: [rd, imm], imm_signed: true, unit: alu, sem: "r = GPC_INSN + b;", desc: "rd = guest instruction address + imm (return addresses, PC-relative operands)."}
+  - {name: ret, title: "Return",     major: SYS, fn: 2,  fmt: S, asm: [], unit: br, cti: ret, sem: "npc = CSTACK_POP();", desc: "Return through the hardware millicode return stack. Underflow is a millicode fault."}
+  - {name: csrr, title: "CSR Read",    major: SYS, fn: 3,  fmt: S, asm: [rd, csr], unit: sys, sem: "r = CSR_READ(IMM);"}
+  - {name: csrw, title: "CSR Write",    major: SYS, fn: 4,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, a & CSR_WMASK[IMM & 0xff]);"}
+  - {name: csrs, title: "CSR Set Bits",    major: SYS, fn: 5,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, (CSR_READ(IMM) | a) & CSR_WMASK[IMM & 0xff]);"}
+  - {name: csrc, title: "CSR Clear Bits",    major: SYS, fn: 6,  fmt: S, asm: [csr, rs1], unit: sys, serialize: true, sem: "CSR_WRITE(IMM, CSR_READ(IMM) & ~a & CSR_WMASK[IMM & 0xff]);"}
+  - {name: unlock, title: "Unlock",  major: SYS, fn: 7,  fmt: S, asm: [], unit: mem, serialize: true, sem: "/* ends the locked sequence; no functional effect */", desc: "End a locked sequence without a store (failed CAS compare)."}
+  - {name: fence, title: "Fence",   major: SYS, fn: 8,  fmt: S, asm: [], unit: mem, serialize: true, desc: "Order all earlier memory accesses before all later ones."}
+  - {name: tlbflush, title: "TLB Flush", major: SYS, fn: 9, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Guest TLB flush. imm bit0: page (address in rs1) vs all; bit1: non-global entries only; bit2: user-only (FC). Covers PFLUSH/PFLUSHN/PFLUSHA.", sem: "MMU_FLUSH(a, IMM);"}
+  - {name: cpush, title: "Cache Push",   major: SYS, fn: 10, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Write back and invalidate guest cache lines. imm bits1:0 cache (1=D, 2=I, 3=both); bits3:2 scope (0=line, 1=page, 2=all). Address in rs1.", sem: "CACHE_OP(a, IMM, 1);"}
+  - {name: cinv, title: "Cache Invalidate",    major: SYS, fn: 11, fmt: S, asm: [rs1, imm], unit: sys, serialize: true, desc: "Invalidate without write back. Same imm encoding as cpush.", sem: "CACHE_OP(a, IMM, 0);"}
+  - {name: irqack, title: "Interrupt Acknowledge",  major: SYS, fn: 12, fmt: S, asm: [rd, rs1], unit: sys, serialize: true, desc: "Acknowledge the interrupt at level rs1; rd = vector (autovector if none supplied)."}
+  - {name: stop, title: "Stop",    major: SYS, fn: 13, fmt: S, asm: [], unit: sys, serialize: true, desc: "Wait for an interrupt (68k STOP, after millicode has loaded SR)."}
+  - {name: halt, title: "Halt",    major: SYS, fn: 14, fmt: S, asm: [imm], unit: sys, serialize: true, desc: "Stop the machine (simulation / debug). imm is a status code."}
+  - {name: brk, title: "Breakpoint",     major: SYS, fn: 15, fmt: S, asm: [imm], unit: sys, serialize: true, desc: "Debug breakpoint."}
+
+  # --- floating point (major FP; `fp` names the fields that are FP registers,
+  # f0-f15 of their own namespace: spec `fp_regs`). The arithmetic is IEEE 754
+  # binary64 / binary32 with default exception handling, the rounding mode the
+  # FPCR's (CSR fpcr bits 5:4, 68k order: 0 nearest, 1 toward zero, 2 toward
+  # -inf, 3 toward +inf), denormals in full (gradual underflow, no flush),
+  # tininess detected before rounding, and these NaN rules: a signaling NaN
+  # operand (the first, then the second) is the result, quieted; else the first
+  # quiet NaN operand; an invalid operation on non-NaN operands gives the
+  # default NaN 0x7ff8000000000000 (single 0x7fc00000). A single occupies bits
+  # 31:0 of its register; an op with a single result writes bits 63:32 zero.
+  # Every arithmetic and conversion op ORs the IEEE exceptions it raises into
+  # CSR fflags; the moves and sign ops raise none. (These are the rules of an
+  # AArch64 host's double arithmetic, which q800sim's FPU uses: spec FP section
+  # in doc/intro.md.) No FP op traps.
+  - {name: fadd.d, title: "FP Add Double", major: FP, fn: 0, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 + fs2 (binary64)."}
+  - {name: fsub.d, title: "FP Subtract Double", major: FP, fn: 1, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 - fs2."}
+  - {name: fmul.d, title: "FP Multiply Double", major: FP, fn: 2, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 * fs2."}
+  - {name: fdiv.d, title: "FP Divide Double", major: FP, fn: 3, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 / fs2 (the shared iterative divider)."}
+  - {name: fsqrt.d, title: "FP Square Root Double", major: FP, fn: 4, fmt: R, asm: [rd, rs1], fp: [rd, rs1], unit: fpu, desc: "fd = sqrt(fs1) (the shared iterative divider)."}
+  - {name: fmul.s, title: "FP Multiply Single", major: FP, fn: 5, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 * fs2 (binary32, operands and result in bits 31:0)."}
+  - {name: fdiv.s, title: "FP Divide Single", major: FP, fn: 6, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 / fs2 (binary32)."}
+  - {name: fcvt.s.d, title: "FP Convert Double to Single", major: FP, fn: 7, fmt: R, asm: [rd, rs1], fp: [rd, rs1], unit: fpu, desc: "fd = fs1 rounded to binary32 (overflow, underflow, inexact; a NaN keeps its sign and payload top, quieted)."}
+  - {name: fcvt.d.s, title: "FP Convert Single to Double", major: FP, fn: 8, fmt: R, asm: [rd, rs1], fp: [rd, rs1], unit: fpu, desc: "fd = the binary32 in fs1 widened to binary64 (exact; a signaling NaN is quieted and raises invalid)."}
+  - {name: fmov.d, title: "FP Move", major: FP, fn: 9, fmt: R, asm: [rd, rs1], fp: [rd, rs1], unit: fpu, desc: "fd = fs1, all 64 bits. No exceptions."}
+  - {name: fneg.d, title: "FP Negate", major: FP, fn: 10, fmt: R, asm: [rd, rs1], fp: [rd, rs1], unit: fpu, desc: "fd = fs1 with bit 63 inverted (NaNs too). No exceptions."}
+  - {name: fabs.d, title: "FP Absolute Value", major: FP, fn: 11, fmt: R, asm: [rd, rs1], fp: [rd, rs1], unit: fpu, desc: "fd = fs1 with bit 63 cleared (NaNs too). No exceptions."}
+  - {name: fsethi, title: "FP Set High Word", major: FP, fn: 16, fmt: R, asm: [rd, rs1], fp: [rd], reads_rd: true, unit: fpu, desc: "fd[63:32] = rs1; fd[31:0] keeps its value (fd is a source). An integer-to-FP move."}
+  - {name: fsetlo, title: "FP Set Low Word", major: FP, fn: 17, fmt: R, asm: [rd, rs1], fp: [rd], reads_rd: true, unit: fpu, desc: "fd[31:0] = rs1; fd[63:32] keeps its value (fd is a source)."}
+  - {name: fgethi, title: "FP Get High Word", major: FP, fn: 18, fmt: R, asm: [rd, rs1], fp: [rs1], unit: fpu, desc: "rd = fs1[63:32]. An FP-to-integer move."}
+  - {name: fgetlo, title: "FP Get Low Word", major: FP, fn: 19, fmt: R, asm: [rd, rs1], fp: [rs1], unit: fpu, desc: "rd = fs1[31:0]."}
 
 # ---------------------------------------------------------------------------
 # Memory operations. Big-endian. The `sp` field selects the address space;
@@ -293,42 +363,88 @@ base_ops:
 # millicode fault.
 # ---------------------------------------------------------------------------
 mem_ops:
-  - {name: ld.8u,  major: LD8U,  kind: load,  bytes: 1, signed: false}
-  - {name: ld.8s,  major: LD8S,  kind: load,  bytes: 1, signed: true}
-  - {name: ld.16u, major: LD16U, kind: load,  bytes: 2, signed: false}
-  - {name: ld.16s, major: LD16S, kind: load,  bytes: 2, signed: true}
-  - {name: ld.32,  major: LD32,  kind: load,  bytes: 4, signed: false}
-  - {name: st.8,   major: ST8,   kind: store, bytes: 1}
-  - {name: st.16,  major: ST16,  kind: store, bytes: 2}
-  - {name: st.32,  major: ST32,  kind: store, bytes: 4}
-  - {name: ldl.8,  major: LDL8,  kind: load,  bytes: 1, signed: false, locked: begin, desc: "Locked load: begins an atomic sequence (TAS, CAS, CAS2). Executes non-speculatively."}
-  - {name: ldl.16, major: LDL16, kind: load,  bytes: 2, signed: false, locked: begin}
-  - {name: ldl.32, major: LDL32, kind: load,  bytes: 4, signed: false, locked: begin}
-  - {name: stu.8,  major: STU8,  kind: store, bytes: 1, locked: end, desc: "Unlocking store: ends the atomic sequence."}
-  - {name: stu.16, major: STU16, kind: store, bytes: 2, locked: end}
-  - {name: stu.32, major: STU32, kind: store, bytes: 4, locked: end}
+  - {name: ld.8u, title: "Load 8-bit Unsigned",  major: LD8U,  kind: load,  bytes: 1, signed: false}
+  - {name: ld.8s, title: "Load 8-bit Signed",  major: LD8S,  kind: load,  bytes: 1, signed: true}
+  - {name: ld.16u, title: "Load 16-bit Unsigned", major: LD16U, kind: load,  bytes: 2, signed: false}
+  - {name: ld.16s, title: "Load 16-bit Signed", major: LD16S, kind: load,  bytes: 2, signed: true}
+  - {name: ld.32, title: "Load 32-bit",  major: LD32,  kind: load,  bytes: 4, signed: false}
+  - {name: st.8, title: "Store 8-bit",   major: ST8,   kind: store, bytes: 1}
+  - {name: st.16, title: "Store 16-bit",  major: ST16,  kind: store, bytes: 2}
+  - {name: st.32, title: "Store 32-bit",  major: ST32,  kind: store, bytes: 4}
+  - {name: ldl.8, title: "Locked Load 8-bit",  major: LDL8,  kind: load,  bytes: 1, signed: false, locked: begin, desc: "Locked load: begins an atomic sequence (TAS, CAS, CAS2). Executes non-speculatively."}
+  - {name: ldl.16, title: "Locked Load 16-bit", major: LDL16, kind: load,  bytes: 2, signed: false, locked: begin}
+  - {name: ldl.32, title: "Locked Load 32-bit", major: LDL32, kind: load,  bytes: 4, signed: false, locked: begin}
+  - {name: stu.8, title: "Unlocking Store 8-bit",  major: STU8,  kind: store, bytes: 1, locked: end, desc: "Unlocking store: ends the atomic sequence."}
+  - {name: stu.16, title: "Unlocking Store 16-bit", major: STU16, kind: store, bytes: 2, locked: end}
+  - {name: stu.32, title: "Unlocking Store 32-bit", major: STU32, kind: store, bytes: 4, locked: end}
   # Compare-and-swap (as SPARC CASA): an atomic read-modify-write of the
   # operand at rs1 + imm. If it equals the low bytes of rs2, the low bytes of
   # rd are stored there; either way rd gets the old operand, zero-extended.
   # rd is read and written (the store value in, the old value out). Executes
   # non-speculatively, like the locked loads. Function code: as a store (DFC
   # for .ga).
-  - {name: cas.8,  major: CAS, sz: 0, kind: cas, bytes: 1, desc: "Compare-and-swap byte: if [rs1 + imm] == rs2[7:0], store rd[7:0]; rd = the old byte. Atomic (as SPARC CASA); 68k CAS on the PLA path."}
-  - {name: cas.16, major: CAS, sz: 1, kind: cas, bytes: 2}
-  - {name: cas.32, major: CAS, sz: 2, kind: cas, bytes: 4}
-  - {name: probe.r, major: PROBER, kind: probe, bytes: 0, desc: "Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). The access would succeed if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga."}
-  - {name: probe.w, major: PROBEW, kind: probe, bytes: 0, desc: "As probe.r, translating for a write."}
+  - {name: cas.8, title: "Compare and Swap 8-bit",  major: CAS, sz: 0, kind: cas, bytes: 1, desc: "Compare-and-swap byte: if [rs1 + imm] == rs2[7:0], store rd[7:0]; rd = the old byte. Atomic (as SPARC CASA); 68k CAS on the PLA path."}
+  - {name: cas.16, title: "Compare and Swap 16-bit", major: CAS, sz: 1, kind: cas, bytes: 2}
+  - {name: cas.32, title: "Compare and Swap 32-bit", major: CAS, sz: 2, kind: cas, bytes: 4}
+  # Probes (format MP). The um field gives each three forms: probe.r (um 0:
+  # rd only), probe.r.us (um 1: also u = ok) and probe.r.ua (um 2: also
+  # u = u && ok), where ok is `probe_ok` above; um 3 is reserved (illegal).
+  - {name: probe.r, title: "Probe for Read", major: PROBER, kind: probe, bytes: 0, fmt: MP, u_forms: true,
+     sem: "r = MMUSR(TRANSLATE(sp, a + IMM, READ)); if (UM == 1) U = PROBE_OK(r, 0, USER(sp), TCE); if (UM == 2) U = uin && PROBE_OK(r, 0, USER(sp), TCE);",
+     desc: "Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). With translation disabled (TC.E = 0) and no TTR matching, rd = 0 (the access is untranslated). The access would succeed (ok, spec probe_ok) if translation is disabled and no TTR matched (rd = 0), or if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga. probe.r.us also sets the millicode predicate u to that success (ok); probe.r.ua sets u = u && ok, so a chain of probes leaves u set only if every probed access would succeed."}
+  - {name: probe.w, title: "Probe for Write", major: PROBEW, kind: probe, bytes: 0, fmt: MP, u_forms: true,
+     sem: "r = MMUSR(TRANSLATE(sp, a + IMM, WRITE)); if (UM == 1) U = PROBE_OK(r, 1, USER(sp), TCE); if (UM == 2) U = uin && PROBE_OK(r, 1, USER(sp), TCE);",
+     desc: "As probe.r, translating for a write (ok also needs W clear); probe.w.us / probe.w.ua write u as probe.r.us / probe.r.ua."}
+  # Conditional loads and stores (formats MCL, MCS): read the millicode
+  # predicate u. With u set they are exactly the plain access; with u clear
+  # they make no access at all (no translation, no fault, no ATC or cache
+  # side effect), a load writes rd = 0 and a store writes nothing. For
+  # millicode that probes every address of a side-effecting (uncached) access
+  # before performing any: the u dependence orders them after the probes.
+  - {name: ld.c.8u, title: "Conditional Load 8-bit Unsigned",  major: LDC, lk: 0, kind: load, bytes: 1, signed: false, fmt: MCL, reads_flags: [u],
+     sem: "if (uin) r = ZX(LOAD(sp, a + IMM, 1), 8); else r = 0;",
+     desc: "Conditional load: if u is set, exactly ld.8u; if u is clear, rd = 0 and no access is made (no translation, no fault)."}
+  - {name: ld.c.8s, title: "Conditional Load 8-bit Signed",    major: LDC, lk: 1, kind: load, bytes: 1, signed: true,  fmt: MCL, reads_flags: [u],
+     sem: "if (uin) r = SX(LOAD(sp, a + IMM, 1), 8); else r = 0;",
+     desc: "Conditional load: if u is set, exactly ld.8s; if u is clear, rd = 0 and no access is made."}
+  - {name: ld.c.16u, title: "Conditional Load 16-bit Unsigned", major: LDC, lk: 2, kind: load, bytes: 2, signed: false, fmt: MCL, reads_flags: [u],
+     sem: "if (uin) r = ZX(LOAD(sp, a + IMM, 2), 16); else r = 0;",
+     desc: "Conditional load: if u is set, exactly ld.16u; if u is clear, rd = 0 and no access is made."}
+  - {name: ld.c.16s, title: "Conditional Load 16-bit Signed",   major: LDC, lk: 3, kind: load, bytes: 2, signed: true,  fmt: MCL, reads_flags: [u],
+     sem: "if (uin) r = SX(LOAD(sp, a + IMM, 2), 16); else r = 0;",
+     desc: "Conditional load: if u is set, exactly ld.16s; if u is clear, rd = 0 and no access is made."}
+  - {name: ld.c.32, title: "Conditional Load 32-bit",           major: LDC, lk: 4, kind: load, bytes: 4, signed: false, fmt: MCL, reads_flags: [u],
+     sem: "if (uin) r = LOAD(sp, a + IMM, 4); else r = 0;",
+     desc: "Conditional load: if u is set, exactly ld.32; if u is clear, rd = 0 and no access is made."}
+  - {name: st.c.8, title: "Conditional Store 8-bit",   major: STC, sz: 0, ul: 0, kind: store, bytes: 1, fmt: MCS, reads_flags: [u],
+     sem: "if (uin) STORE(sp, a + IMM, 1, OLD);",
+     desc: "Conditional store: if u is set, exactly st.8 (the data is in rd); if u is clear, nothing is stored and no access is made. Only a store that happens is a guest-visible write."}
+  - {name: st.c.16, title: "Conditional Store 16-bit", major: STC, sz: 1, ul: 0, kind: store, bytes: 2, fmt: MCS, reads_flags: [u],
+     sem: "if (uin) STORE(sp, a + IMM, 2, OLD);",
+     desc: "Conditional store: if u is set, exactly st.16; if u is clear, nothing is stored."}
+  - {name: st.c.32, title: "Conditional Store 32-bit", major: STC, sz: 2, ul: 0, kind: store, bytes: 4, fmt: MCS, reads_flags: [u],
+     sem: "if (uin) STORE(sp, a + IMM, 4, OLD);",
+     desc: "Conditional store: if u is set, exactly st.32; if u is clear, nothing is stored."}
+  - {name: stu.c.8, title: "Conditional Unlocking Store 8-bit",   major: STC, sz: 0, ul: 1, kind: store, bytes: 1, locked: end, fmt: MCS, reads_flags: [u],
+     sem: "if (uin) STORE(sp, a + IMM, 1, OLD); UNLOCK();",
+     desc: "Conditional unlocking store: if u is set, exactly stu.8; if u is clear, nothing is stored. It releases the lock (ends the locked sequence) either way."}
+  - {name: stu.c.16, title: "Conditional Unlocking Store 16-bit", major: STC, sz: 1, ul: 1, kind: store, bytes: 2, locked: end, fmt: MCS, reads_flags: [u],
+     sem: "if (uin) STORE(sp, a + IMM, 2, OLD); UNLOCK();",
+     desc: "Conditional unlocking store: if u is set, exactly stu.16; if u is clear, nothing is stored. It releases the lock either way."}
+  - {name: stu.c.32, title: "Conditional Unlocking Store 32-bit", major: STC, sz: 2, ul: 1, kind: store, bytes: 4, locked: end, fmt: MCS, reads_flags: [u],
+     sem: "if (uin) STORE(sp, a + IMM, 4, OLD); UNLOCK();",
+     desc: "Conditional unlocking store: if u is set, exactly stu.32; if u is clear, nothing is stored. It releases the lock either way."}
   # Stores with base writeback, for -(An) and (An)+ destinations and pushes.
   # .pre:  address = rs1 + imm, rd = address      (st.32.pre.gd d0, -4(a7))
   # .post: address = rs1,       rd = rs1 + imm    (st.32.post.gd d0, 4(a0))
   # rd is tied to rs1 (two register reads, one result). They are ordinary
   # speculative stores; the register result is ready at address generation.
-  - {name: st.8.pre,   major: STPRE8,   kind: store, bytes: 1, writeback: pre}
-  - {name: st.16.pre,  major: STPRE16,  kind: store, bytes: 2, writeback: pre}
-  - {name: st.32.pre,  major: STPRE32,  kind: store, bytes: 4, writeback: pre}
-  - {name: st.8.post,  major: STPOST8,  kind: store, bytes: 1, writeback: post}
-  - {name: st.16.post, major: STPOST16, kind: store, bytes: 2, writeback: post}
-  - {name: st.32.post, major: STPOST32, kind: store, bytes: 4, writeback: post}
+  - {name: st.8.pre, title: "Store 8-bit with Pre-Writeback",   major: STPRE8,   kind: store, bytes: 1, writeback: pre}
+  - {name: st.16.pre, title: "Store 16-bit with Pre-Writeback",  major: STPRE16,  kind: store, bytes: 2, writeback: pre}
+  - {name: st.32.pre, title: "Store 32-bit with Pre-Writeback",  major: STPRE32,  kind: store, bytes: 4, writeback: pre}
+  - {name: st.8.post, title: "Store 8-bit with Post-Writeback",  major: STPOST8,  kind: store, bytes: 1, writeback: post}
+  - {name: st.16.post, title: "Store 16-bit with Post-Writeback", major: STPOST16, kind: store, bytes: 2, writeback: post}
+  - {name: st.32.post, title: "Store 32-bit with Post-Writeback", major: STPOST32, kind: store, bytes: 4, writeback: post}
 
 # ---------------------------------------------------------------------------
 # Guest-semantic ops (68k ALU behaviour). Each family expands into:
@@ -355,6 +471,7 @@ mem_ops:
 # ---------------------------------------------------------------------------
 guest_ops:
   - name: add
+    title: "Guest Add"
     fn: 0
     kind: binary
     imm: true
@@ -367,6 +484,7 @@ guest_ops:
       N = MSB(r, n); Z = (r == 0);
 
   - name: addx
+    title: "Guest Add Extended"
     fn: 1
     kind: binary
     reads: [X, Z]
@@ -380,6 +498,7 @@ guest_ops:
     desc: "Z is sticky: cleared if the result is nonzero, otherwise unchanged."
 
   - name: sub
+    title: "Guest Subtract"
     fn: 2
     kind: binary
     imm: true
@@ -391,6 +510,7 @@ guest_ops:
       N = MSB(r, n); Z = (r == 0);
 
   - name: subx
+    title: "Guest Subtract Extended"
     fn: 3
     kind: binary
     reads: [X, Z]
@@ -402,6 +522,7 @@ guest_ops:
       N = MSB(r, n); Z = zin && (r == 0);
 
   - name: neg
+    title: "Guest Negate"
     fn: 4
     kind: unary
     writes: [N, Z, V, C, X]
@@ -412,6 +533,7 @@ guest_ops:
       N = MSB(r, n); Z = (r == 0);
 
   - name: negx
+    title: "Guest Negate Extended"
     fn: 5
     kind: unary
     reads: [X, Z]
@@ -423,6 +545,7 @@ guest_ops:
       N = MSB(r, n); Z = zin && (r == 0);
 
   - name: cmp
+    title: "Guest Compare"
     fn: 6
     kind: compare
     imm: true
@@ -435,6 +558,7 @@ guest_ops:
     desc: "Flags of rs1 - rs2. X unaffected."
 
   - name: and
+    title: "Guest And"
     fn: 7
     kind: binary
     imm: true
@@ -442,6 +566,7 @@ guest_ops:
     sem: "r = (a & b) & m; N = MSB(r, n); Z = (r == 0); V = 0; C = 0;"
 
   - name: or
+    title: "Guest Or"
     fn: 8
     kind: binary
     imm: true
@@ -449,6 +574,7 @@ guest_ops:
     sem: "r = (a | b) & m; N = MSB(r, n); Z = (r == 0); V = 0; C = 0;"
 
   - name: eor
+    title: "Guest Exclusive Or"
     fn: 9
     kind: binary
     imm: true
@@ -456,12 +582,14 @@ guest_ops:
     sem: "r = (a ^ b) & m; N = MSB(r, n); Z = (r == 0); V = 0; C = 0;"
 
   - name: not
+    title: "Guest Not"
     fn: 10
     kind: unary
     writes: [N, Z, V, C]
     sem: "r = ~b & m; N = MSB(r, n); Z = (r == 0); V = 0; C = 0;"
 
   - name: mov
+    title: "Guest Move"
     fn: 11
     kind: unary
     imm: true
@@ -470,6 +598,7 @@ guest_ops:
     desc: "MOVE / TST. mov.8z x0, rs gives TST.B."
 
   - name: lsl
+    title: "Guest Logical Shift Left"
     fn: 12
     kind: binary
     imm: true
@@ -483,6 +612,7 @@ guest_ops:
     desc: "Count is rs2 mod 64. A zero count clears C and leaves X; X is therefore always read."
 
   - name: lsr
+    title: "Guest Logical Shift Right"
     fn: 13
     kind: binary
     imm: true
@@ -495,6 +625,7 @@ guest_ops:
       V = 0; N = MSB(r, n); Z = (r == 0);
 
   - name: asl
+    title: "Guest Arithmetic Shift Left"
     fn: 14
     kind: binary
     imm: true
@@ -513,6 +644,7 @@ guest_ops:
     desc: "V is set if the most significant bit changes at any time during the shift."
 
   - name: asr
+    title: "Guest Arithmetic Shift Right"
     fn: 15
     kind: binary
     imm: true
@@ -525,6 +657,7 @@ guest_ops:
       V = 0; N = MSB(r, n); Z = (r == 0);
 
   - name: rol
+    title: "Guest Rotate Left"
     fn: 16
     kind: binary
     imm: true
@@ -537,6 +670,7 @@ guest_ops:
     desc: "X unaffected."
 
   - name: ror
+    title: "Guest Rotate Right"
     fn: 17
     kind: binary
     imm: true
@@ -548,6 +682,7 @@ guest_ops:
       V = 0; N = MSB(r, n); Z = (r == 0);
 
   - name: roxl
+    title: "Guest Rotate Left through X"
     fn: 18
     kind: binary
     imm: true
@@ -561,6 +696,7 @@ guest_ops:
     desc: "Rotate through X (n+1 bits). A zero count sets C to X."
 
   - name: roxr
+    title: "Guest Rotate Right through X"
     fn: 19
     kind: binary
     imm: true
@@ -573,6 +709,7 @@ guest_ops:
       V = 0; N = MSB(r, n); Z = (r == 0);
 
   - name: abcd
+    title: "Guest Add Decimal with Extend"
     fn: 20
     kind: binary
     sizes: [8]
@@ -589,6 +726,7 @@ guest_ops:
     desc: "Packed BCD add with X. N and V are undefined on the 68040; the values here are placeholders to be matched to the reference model."
 
   - name: sbcd
+    title: "Guest Subtract Decimal with Extend"
     fn: 21
     kind: binary
     sizes: [8]
@@ -605,6 +743,7 @@ guest_ops:
     desc: "Packed BCD rs1 - rs2 - X. N and V undefined (placeholders)."
 
   - name: nbcd
+    title: "Guest Negate Decimal with Extend"
     fn: 22
     kind: unary
     sizes: [8]
@@ -620,6 +759,7 @@ guest_ops:
       Z = zin && (r == 0); N = MSB(r, 8); V = 0;
 
   - name: mulu
+    title: "Guest Multiply Unsigned"
     fn: 23
     kind: full
     sizes: [16, 32]
@@ -631,6 +771,7 @@ guest_ops:
     desc: ".16: 16x16->32 (MULU.W). .32: low 32 bits, V on overflow (MULU.L 32-bit result). High half: base mulhu."
 
   - name: muls
+    title: "Guest Multiply Signed"
     fn: 24
     kind: full
     sizes: [16, 32]
@@ -641,8 +782,10 @@ guest_ops:
       N = MSB(r, 32); Z = (r == 0); C = 0;
 
   - name: divu
+    title: "Guest Divide Unsigned"
     fn: 25
     kind: tiedfull
+    reads: [N, Z, V]   # kept when the divisor is zero (N Z V) or the quotient overflows (N Z)
     sizes: [16, 32]
     writes: [N, Z, V, C]
     sem: |
@@ -657,8 +800,10 @@ guest_ops:
     desc: ".16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd, N and Z are unchanged, V is set and C cleared (as the 68040 does). .32: quotient only; remainder via base remu."
 
   - name: divs
+    title: "Guest Divide Signed"
     fn: 26
     kind: tiedfull
+    reads: [N, Z, V]   # kept when the divisor is zero (N Z V) or the quotient overflows (N Z)
     sizes: [16, 32]
     writes: [N, Z, V, C]
     sem: |
@@ -673,6 +818,7 @@ guest_ops:
     trap: "zero divisor: as divu"
 
   - name: ext
+    title: "Guest Sign-Extend"
     fn: 27
     kind: unary
     sizes: [16, 32]
@@ -681,6 +827,7 @@ guest_ops:
     desc: ".16: EXT.W (byte to word, merged). .32: EXT.L (word to long)."
 
   - name: extb
+    title: "Guest Sign-Extend Byte to 32-bit"
     fn: 28
     kind: unary
     sizes: [32]
@@ -689,6 +836,7 @@ guest_ops:
     desc: "EXTB.L (byte to long)."
 
   - name: btst
+    title: "Guest Test Bit"
     fn: 29
     kind: compare
     sizes: [8, 32]
@@ -699,6 +847,7 @@ guest_ops:
     desc: "Bit test: only Z changes, so NZVC is read and merged. .8 for memory operands (bit mod 8), .32 for Dn (bit mod 32)."
 
   - name: bchg
+    title: "Guest Test and Change Bit"
     fn: 30
     kind: binary
     sizes: [8, 32]
@@ -708,6 +857,7 @@ guest_ops:
     sem: "unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a ^ (1u << k)) & m; N = nin; V = vin; C = cin;"
 
   - name: bclr
+    title: "Guest Test and Clear Bit"
     fn: 31
     kind: binary
     sizes: [8, 32]
@@ -717,6 +867,7 @@ guest_ops:
     sem: "unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a & ~(1u << k)) & m; N = nin; V = vin; C = cin;"
 
   - name: bset
+    title: "Guest Test and Set Bit"
     fn: 32
     kind: binary
     sizes: [8, 32]
@@ -744,9 +895,11 @@ csrs:
   - {num: 0x0c, name: usp,   desc: "Inactive user stack pointer."}
   - {num: 0x0d, name: isp,   desc: "Inactive interrupt stack pointer."}
   - {num: 0x0e, name: msp,   desc: "Inactive master stack pointer."}
-  - {num: 0x20, name: fpcr,  desc: "Reserved for the FP extension."}
-  - {num: 0x21, name: fpsr,  desc: "Reserved for the FP extension."}
-  - {num: 0x22, name: fpiar, desc: "Reserved for the FP extension."}
+  - {num: 0x20, name: fpcr,  desc: "68881 FPCR: exception enables 15:8, rounding precision 7:6, rounding mode 5:4 (the FP ops' dynamic rounding mode). All 32 bits are kept (millicode masks what a 68k FMOVE writes)."}
+  - {num: 0x21, name: fpsr,  wmask: 0x0ffffff8, desc: "68881 FPSR: condition codes 27:24, quotient 23:16, exception status 15:8, accrued exceptions 7:3."}
+  - {num: 0x22, name: fpiar, desc: "68881 FPIAR: the address of the last FP instruction that set it."}
+  - {num: 0x23, name: fflags, wmask: 0x0000001f, desc: "IEEE exceptions accrued by the FP ops: NV 4, DZ 3, OF 2, UF 1, NX 0. Every FP arithmetic or conversion op ORs in what it raises; a read sees every older FP op's flags (an implementation orders it after them)."}
+  - {num: 0x24, name: fpused, wmask: 0x00000001, desc: "Bit 0: the FPU has been used since its last reset (68040 FSAVE: an idle frame; clear: a null frame). Not 68k-visible."}
   - {num: 0x40, name: mstatus,      desc: "Micro-engine status: pending interrupt level, trace pending, locked-sequence active."}
   - {num: 0x41, name: fault_addr,   desc: "Guest access fault: faulting address (68040 frame FA and WB3A)."}
   - {num: 0x42, name: fault_status, desc: "Guest access fault: 68040 special status word (SSW): read/write, size, transfer type and modifier, continuation bits."}

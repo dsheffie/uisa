@@ -53,17 +53,38 @@ def describe(spec, v):
     args, rng, tmpl = [], [], []
     has_result = spec.writes_rd(v)
     tied = -1
+    fpf = spec.fp_fields(v)
+    if fpf:
+        # FP ops: an FP register operand is a constant (the register number,
+        # printed as fN); the FP register file is not allocated, so every FP
+        # op is ordered (side effects) unless it only reads FP registers into
+        # an x register result
+        nfp = len(spec.fp_regs)
+        for op in v.operands:
+            if op in fpf:
+                tmpl.append("f%%%d" % len(args))
+                args.append("i")
+                rng.append((0, nfp - 1, 1))
+            elif op == "rd":
+                tmpl.append("%d")
+            else:
+                tmpl.append("%%%d" % len(args))
+                args.append("v")
+                rng.append((0, 0, 1))
+        return args, tmpl, spec.writes_int_rd(v), -1, rng
 
     def add_arg(kind, r=(0, 0, 1)):
         args.append(kind)
         rng.append(r)
         return len(args) - 1
 
+    # an address argument's range is the displacement the instruction takes
+    # (12 bits for plain loads and stores, 10 for probes, 9 for ld.c / st.c)
     if v.kind in ("load", "probe"):
-        a = add_arg("m")
+        a = add_arg("m", imm_range(spec, v))
         tmpl = ["%d", "%%m%d" % a]
     elif v.kind == "store" and not v.attrs.get("writeback"):
-        a = add_arg("m")
+        a = add_arg("m", imm_range(spec, v))
         d = add_arg("v")
         tmpl = ["%%%d" % d, "%%m%d" % a]
     elif v.kind == "store":                       # base-register writeback
@@ -116,7 +137,8 @@ def main():
         cti = v.attrs.get("cti")
         noreturn = cti in NORETURN_CTI or v.mnemonic in NORETURN_NAMES
         side = (not has_result or bool(v.attrs.get("writes_flags")) or v.kind in ("load", "store", "probe")
-                or v.attrs.get("serialize") or v.attrs.get("store_bytes") or cti is not None or noreturn)
+                or v.attrs.get("serialize") or v.attrs.get("store_bytes") or cti is not None or noreturn
+                or ("rd" in spec.fp_fields(v)))
         name = "__" + v.mnemonic.replace(".", "_")
         asm = v.mnemonic + ((" " + ", ".join(tmpl)) if tmpl else "")
         argr = ", ".join("{%d, %d, %d}" % r for r in rng) or "{0, 0, 1}"

@@ -110,10 +110,59 @@ static void test_decode() {
   check(decode(0xc4000000u).op == UISA_ILLEGAL, "reserved major (FP, 49) is illegal");
 }
 
+// the millicode predicate u: encodings, reserved values, the op table's u bits
+static void test_u() {
+  for (uint32_t sp = 0; sp < 4; sp++) {
+    check(decode((36u << 26) | (sp << 12) | (3u << 10)).op == UISA_ILLEGAL, "probe.r um=3 is illegal");
+    check(decode((37u << 26) | (sp << 12) | (3u << 10)).op == UISA_ILLEGAL, "probe.w um=3 is illegal");
+    for (uint32_t lk = 5; lk < 8; lk++)
+      check(decode((54u << 26) | (sp << 12) | (lk << 9)).op == UISA_ILLEGAL, "ld.c lk 5-7 is illegal");
+    for (uint32_t ul = 0; ul < 2; ul++)
+      check(decode((53u << 26) | (sp << 12) | (3u << 10) | (ul << 9)).op == UISA_ILLEGAL, "st.c sz=3 is illegal");
+  }
+  for (uint32_t m = 49; m <= 52; m++) check(decode(m << 26).op == UISA_ILLEGAL, "majors 49-52 reserved (FP)");
+  // major 48: FP ops; their FP register fields (opinfo fpregs: bit 0 rd, 1 rs1, 2 rs2)
+  check(decode(48u << 26).op == UISA_FADD_D && OPS[UISA_FADD_D].fpregs == 7 && OPS[UISA_FADD_D].unit == UNIT_FPU,
+        "fadd.d: major 48 fn 0, FP rd rs1 rs2");
+  check(OPS[UISA_FSETHI].fpregs == 1 && OPS[UISA_FSETHI].reads_rd && OPS[UISA_FGETHI].fpregs == 2 &&
+        OPS[UISA_FGETHI].writes_rd, "fsethi / fgethi register files");
+  dec_t d = decode((36u << 26) | (5u << 20) | (10u << 14) | (1u << 12) | (1u << 10) | 0x3f0u);
+  check(d.op == UISA_PROBE_R_US_GD && d.rd == 5 && d.rs1 == 10 && d.sp == 1 && d.imm == 0xfffffff0u, "probe.r.us.gd decode");
+  d = decode((54u << 26) | (11u << 20) | (10u << 14) | (1u << 12) | (1u << 9) | 0x100u);
+  check(d.op == UISA_LD_C_8S_GD && d.rd == 11 && d.imm == 0xffffff00u, "ld.c.8s.gd decode");
+  d = decode((53u << 26) | (13u << 20) | (2u << 14) | (3u << 12) | (2u << 10) | (1u << 9) | 0xffu);
+  check(d.op == UISA_STU_C_32_GA && d.rd == 13 && d.rs1 == 2 && d.imm == 0xff, "stu.c.32.ga decode");
+  d = decode((16u << 26) | (6u << 11) | 0x7ffu);
+  check(d.op == UISA_B_U && d.imm == 0xfffffffcu, "b.u decode");
+  d = decode((16u << 26) | (9u << 20) | (7u << 11) | 2u);
+  check(d.op == UISA_B_NU && d.imm == 8, "b.nu decode (rs1 ignored)");
+  check(OPS[UISA_B_U].reads_u && !OPS[UISA_B_U].reads_rs1 && !OPS[UISA_B_U].reads_rs2, "b.u reads u only");
+  check(!OPS[UISA_B_EQ].reads_u && OPS[UISA_B_EQ].reads_rs1 && OPS[UISA_B_EQ].reads_rs2, "b.eq unchanged");
+  check(OPS[UISA_PROBE_R_US_GD].writes_u && !OPS[UISA_PROBE_R_US_GD].reads_u, "probe .us writes u");
+  check(OPS[UISA_PROBE_W_UA_GD].writes_u && OPS[UISA_PROBE_W_UA_GD].reads_u, "probe .ua reads and writes u");
+  check(!OPS[UISA_PROBE_R_GD].writes_u && !OPS[UISA_PROBE_R_GD].reads_u, "plain probe leaves u");
+  check(OPS[UISA_LD_C_32_GD].reads_u && OPS[UISA_LD_C_32_GD].is_load && OPS[UISA_LD_C_32_GD].mem_bytes == 4, "ld.c.32");
+  check(OPS[UISA_LD_C_16S_GD].load_signed && !OPS[UISA_LD_C_16U_GD].load_signed, "ld.c signedness");
+  check(OPS[UISA_STU_C_16_GD].reads_u && OPS[UISA_STU_C_16_GD].is_store && OPS[UISA_STU_C_16_GD].lock_end &&
+        OPS[UISA_STU_C_16_GD].reads_rd, "stu.c.16");
+  check(!OPS[UISA_ST_C_16_GD].lock_end && !OPS[UISA_ST_C_16_GD].serialize, "st.c is an ordinary store");
+  check(!OPS[UISA_RDCCR].reads_u && !OPS[UISA_WRCCR].writes_u, "rdccr/wrccr do not touch u");
+  // PROBE_OK: T or R, not B; probe.w needs W clear; a user access needs S clear
+  check(!PROBE_OK(0, 0, 0, 1) && PROBE_OK(1, 0, 0, 1) && PROBE_OK(2, 0, 0, 1), "probe ok: T or R");
+  check(!PROBE_OK(0x801, 0, 0, 1), "probe ok: B");
+  check(PROBE_OK(5, 0, 0, 1) && !PROBE_OK(5, 1, 0, 1), "probe ok: W");
+  check(PROBE_OK(0x81, 0, 0, 1) && !PROBE_OK(0x81, 0, 1, 1), "probe ok: S");
+  // translation off (TC.E = 0): MMUSR 0 = no TTR matched, untranslated, ok;
+  // a TTR match (T, R, W from the TTR) still follows the MMUSR rule
+  check(PROBE_OK(0, 0, 0, 0) && PROBE_OK(0, 1, 1, 0), "probe ok: TC.E = 0, no TTR match");
+  check(PROBE_OK(0x3, 1, 0, 0) && !PROBE_OK(0x7, 1, 0, 0) && PROBE_OK(0x7, 0, 1, 0), "probe ok: TC.E = 0, TTR match");
+}
+
 int main() {
   test_gops();
   test_bitfields();
   test_decode();
+  test_u();
   printf("test_cxx: %d failures\n", fails);
   return fails ? 1 : 0;
 }

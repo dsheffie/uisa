@@ -32,10 +32,12 @@ UCC = os.path.join(ROOT, "build", "compiler", "ucc")
 UCCFLAGS = os.environ.get("UCCFLAGS", "-O0").split()
 
 
-def source_text(src):
-    path = os.path.join(ROOT, "millicode", src)
+def source_text(src, mc_dir=None, out_dir=None):
+    """The assembly text of millicode source `src` (a .s, or a .c compiled
+    by ucc). mc_dir / out_dir default to millicode/ and build/millicode/."""
+    path = os.path.join(mc_dir or os.path.join(ROOT, "millicode"), src)
     if src.endswith(".c"):
-        out_dir = os.path.join(ROOT, "build", "millicode")
+        out_dir = out_dir or os.path.join(ROOT, "build", "millicode")
         os.makedirs(out_dir, exist_ok=True)
         out = os.path.join(out_dir, os.path.splitext(src)[0] + ".s")
         if subprocess.call([UCC] + UCCFLAGS + [path, "-o", out]) != 0:
@@ -57,15 +59,27 @@ def check_labels(texts):
                 seen[m.group(1)] = src
 
 
-def main():
-    with open(os.path.join(ROOT, "millicode", "dispatch.yaml")) as f:
-        d = yaml.safe_load(f)
-    texts = [(src, source_text(src)) for src in d["sources"]]
+def load_dispatch(mc_dir=None):
+    with open(os.path.join(mc_dir or os.path.join(ROOT, "millicode"), "dispatch.yaml")) as f:
+        return yaml.safe_load(f)
+
+
+def assemble(spec, d, mc_dir=None, out_dir=None):
+    """Compile and assemble the millicode sources of dispatch.yaml `d` into one
+    image: ([(source, text)], words, labels) with labels as byte addresses
+    from `base`. Shared with tools/check_millicode.py."""
+    texts = [(src, source_text(src, mc_dir, out_dir)) for src in d["sources"]]
     check_labels(texts)
     text = "".join(t + "\n" for _, t in texts)
+    words, labels = spec.assemble_program(text, int(d.get("base", 0)))
+    return texts, words, labels
+
+
+def main():
+    d = load_dispatch()
     spec = uisa.load()
     base = int(d.get("base", 0))
-    words, labels = spec.assemble_program(text, base)
+    _, words, labels = assemble(spec, d)
     ex = flows.Expander()
     entry = [-1] * 65536
     covered = {}

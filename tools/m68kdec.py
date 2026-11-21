@@ -46,10 +46,82 @@ def is_memory(name):
 
 
 def decode(op):
+    """Decode an opword. An encoding the 68040 does not define, including a
+    defined operation with an addressing mode its category excludes, decodes
+    as ILLEGAL (the illegal-instruction exception, vector 4)."""
     line = op >> 12
     fn = _LINES.get(line)
     r = fn(op) if fn else None
-    return r or Insn("ILLEGAL")
+    if r is None or not _legal(op, r):
+        return Insn("ILLEGAL")
+    return r
+
+
+# --- addressing-mode categories (68040 UM / M68000 PRM, section 2) ---------------
+ALL = frozenset(list(EA_NAMES.values()) + list(EA7_NAMES.values()))
+DATA = ALL - {"An"}
+MEMORY = DATA - {"Dn"}
+CONTROL = frozenset({"(An)", "(d16,An)", "(d8,An,Xn)", "abs.W", "abs.L", "(d16,PC)", "(d8,PC,Xn)"})
+ALTERABLE = ALL - {"(d16,PC)", "(d8,PC,Xn)", "#imm"}
+DATA_ALT = ALTERABLE - {"An"}
+MEM_ALT = DATA_ALT - {"Dn"}
+CTRL_ALT = CONTROL - {"(d16,PC)", "(d8,PC,Xn)"}
+
+# the category of the opword's EA field (bits 5:0), by mnemonic
+_EA_CAT = {
+    "ORI": DATA_ALT, "ANDI": DATA_ALT, "SUBI": DATA_ALT, "ADDI": DATA_ALT, "EORI": DATA_ALT,
+    "CMPI": DATA - {"#imm"},
+    "BCHG": DATA_ALT, "BCLR": DATA_ALT, "BSET": DATA_ALT,
+    "CMP2/CHK2": CONTROL, "CAS": MEM_ALT, "MOVES": MEM_ALT,
+    "MOVEA": ALL,
+    "NEGX": DATA_ALT, "CLR": DATA_ALT, "NEG": DATA_ALT, "NOT": DATA_ALT, "NBCD": DATA_ALT, "TAS": DATA_ALT,
+    "TST": ALL, "PEA": CONTROL, "JSR": CONTROL, "JMP": CONTROL, "LEA": CONTROL, "CHK": DATA,
+    "MULx": DATA, "DIVx": DATA, "MULU": DATA, "MULS": DATA, "DIVU": DATA, "DIVS": DATA,
+    "ADDQ": ALTERABLE, "SUBQ": ALTERABLE,
+    "CMP": ALL, "CMPA": ALL, "ADDA": ALL, "SUBA": ALL, "EOR": DATA_ALT,
+    "BFTST": CONTROL | {"Dn"}, "BFEXTU": CONTROL | {"Dn"}, "BFEXTS": CONTROL | {"Dn"}, "BFFFO": CONTROL | {"Dn"},
+    "BFCHG": CTRL_ALT | {"Dn"}, "BFCLR": CTRL_ALT | {"Dn"}, "BFSET": CTRL_ALT | {"Dn"}, "BFINS": CTRL_ALT | {"Dn"},
+    "FSAVE": CTRL_ALT | {"-(An)"}, "FRESTORE": CONTROL | {"(An)+"},
+}
+_SHIFTS = {"ASL", "ASR", "LSL", "LSR", "ROXL", "ROXR", "ROL", "ROR"}
+
+
+def _legal(op, i):
+    """Whether the decoded instruction's addressing modes are in the 68040's
+    categories for it (only the EA field is checked; register-only operands
+    are fixed by the encoding)."""
+    m, line = i.mnem, op >> 12
+    e = ea_lo(op)
+    if line in (1, 2, 3):                                   # MOVE / MOVEA
+        if e is None or (m == "MOVEA" and i.size == "B"):
+            return False
+        if i.size == "B" and e == "An":
+            return False
+        return m == "MOVEA" or i.dst in DATA_ALT
+    if m in ("ORI", "ANDI", "EORI") and i.dst in ("CCR", "SR"):
+        return True
+    if m == "BTST":                                         # static: no #imm; dynamic: any data mode
+        return e in (DATA - {"#imm"} if i.src == "#imm" else DATA)
+    if m == "MOVE":                                         # line 4: to/from SR, CCR, USP
+        if "USP" in (i.src, i.dst):
+            return True
+        return e in (DATA if i.dst in ("SR", "CCR") else DATA_ALT)
+    if m == "MOVEM":
+        return e in ((CONTROL | {"(An)+"}) if i.dst == "list" else (CTRL_ALT | {"-(An)"}))
+    if line == 5 and m.startswith("S") and m != "SUBQ":    # Scc
+        return e in DATA_ALT
+    if m in ("ADDQ", "SUBQ", "CMP", "TST") and i.size == "B" and e == "An":
+        return False
+    if m in ("OR", "AND", "ADD", "SUB"):
+        if (op >> 6) & 7 < 3:                               # opmode 0-2: <ea>,Dn
+            if m in ("OR", "AND"):
+                return e in DATA
+            return e in ALL and not (i.size == "B" and e == "An")
+        return e in MEM_ALT                                 # Dn,<ea>
+    if line == 0xE and m in _SHIFTS and i.src is None:      # memory shifts
+        return e in MEM_ALT
+    cat = _EA_CAT.get(m)
+    return cat is None or e in cat
 
 
 # --- line 0: immediates, bit ops, MOVEP, CAS, CMP2/CHK2, MOVES -------------

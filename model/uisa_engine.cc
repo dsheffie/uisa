@@ -15,6 +15,7 @@ struct EngineMem : Mem {
   EngineHost &host;
   int prog_fc;
   std::vector<EngineStore> &stores;
+  const Machine *m = nullptr;
   EngineMem(EngineHost &h, int pfc, std::vector<EngineStore> &st) : host(h), prog_fc(pfc), stores(st) {}
 
   bool ifetch(uint32_t addr, int n, uint32_t &v) override { return host.read(prog_fc, addr, n, v); }
@@ -32,7 +33,7 @@ struct EngineMem : Mem {
     return true;
   }
   void store(int fc, uint32_t addr, int n, uint32_t v) override {
-    stores.push_back({(uint8_t)fc, (uint8_t)n, addr, n == 4 ? v : v & ((1u << (8 * n)) - 1)});
+    stores.push_back({(uint8_t)fc, (uint8_t)n, addr, n == 4 ? v : v & ((1u << (8 * n)) - 1), m ? m->mc_seq : 0});
   }
   uint32_t probe(int fc, uint32_t addr, bool write) override { return host.probe(fc, addr, write); }
   void mmu_flush() override { host.mmu_flush(); }
@@ -51,7 +52,11 @@ int engine_step(uint16_t op, uisa_m68k_state &s, EngineHost &host, EngineResult 
   r.raised = false;
   r.vector = 0;
   r.uops = 0;
+  r.ilen = 0;
+  r.full_ext = false;
   r.fail = R_MATCH;
+  r.pnr_seq = r.pnr_mpc = r.pnr_fault_mpc = 0;
+  r.pnr_violation = false;
   EngineMem mem(host, (s.sr & 0x2000) ? 6 : 2, r.stores);
   Flow f = select_flow(op, s.sr, s.pc, mem);
   r.kind = f.kind;
@@ -61,12 +66,32 @@ int engine_step(uint16_t op, uisa_m68k_state &s, EngineHost &host, EngineResult 
     r.why = f.kind == K_MILLICODE ? "no millicode routine" : engine_kind_name(f.kind);
     return r.status = E_FALLBACK;
   }
+  // the FPU routines need the host's FP state (uisa_m68k_state fp_valid)
+  if ((op & 0xfe00) == 0xf200 && s.fp_valid != UISA_FP_VALID) {
+    r.fail = R_NATIVE;
+    r.why = "coprocessor 1 without the host's FP state";
+    return r.status = E_FALLBACK;
+  }
   Machine m;
   setup(m, mem, op, s);
+  mem.m = &m;
   uint64_t seq0 = seq_uops_total;
   uint32_t model_pc = exec_flow(m, f);
   r.uops = f.kind == K_PLA ? (uint32_t)f.len + m.mc_insns
          : f.kind == K_SEQUENCER ? (uint32_t)(seq_uops_total - seq0) : m.mc_insns;
+  // length: the length decoder's (flow length plus full-format words); in
+  // millicode, x4 is the next sequential PC, corrected by the EA helpers
+  if (f.kind == K_MILLICODE) {
+    uint32_t mc = m.R[4] - s.pc;
+    r.ilen = (mc >= 2 && mc <= 22 && !(mc & 1)) ? mc : (uint32_t)f.ilen;
+  } else {
+    r.ilen = (uint32_t)f.ilen + (uint32_t)m.full_extra;
+  }
+  r.full_ext = r.ilen > (uint32_t)f.ilen;
+  r.pnr_seq = m.pnr_seq;
+  r.pnr_mpc = m.pnr_mpc;
+  r.pnr_violation = m.pnr_violation;
+  r.pnr_fault_mpc = m.pnr_fault_mpc;
   if (m.fail != R_MATCH) {
     r.fail = m.fail;
     r.why = m.why;

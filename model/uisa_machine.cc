@@ -2,6 +2,8 @@
 
 #include "uisa_machine.h"
 
+#include <cfenv>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -19,7 +21,7 @@ enum { IK_CONST, IK_D16, IK_D8, IK_ABSW, IK_ABSL, IK_IMMB, IK_IMMW, IK_IMML, IK_
 
 const char *const R_NAMES[R_NUM] = {"match", "reg", "ccr", "pc", "sr", "ctl", "store", "load-not-in-log",
                                     "ext-not-in-log", "full-ext", "unsupported", "mc-unhandled", "exception",
-                                    "native", "aborted"};
+                                    "native", "aborted", "fp"};
 
 uint64_t pla_uops_total, seq_uops_total, mc_insns_total;
 static uint64_t mc_prof_counts[sizeof MC_IMAGE / sizeof MC_IMAGE[0]];
@@ -69,12 +71,20 @@ int Machine::fc_space(int space, bool write) const {
 
 uint32_t Machine::ext16(int off) {
   uint32_t v;
-  if (!mem->ifetch(gpc_insn + off, 2, v)) { failf(R_EXT_NOT_IN_LOG); return 0; }
+  if (!mem->ifetch(gpc_insn + off, 2, v)) {
+    if (pnr_seq && !raised && !pnr_violation) { pnr_violation = true; pnr_fault_mpc = cur_pc; }
+    failf(R_EXT_NOT_IN_LOG);
+    return 0;
+  }
   return v;
 }
 uint32_t Machine::ext32(int off) {
   uint32_t v;
-  if (!mem->ifetch(gpc_insn + off, 4, v)) { failf(R_EXT_NOT_IN_LOG); return 0; }
+  if (!mem->ifetch(gpc_insn + off, 4, v)) {
+    if (pnr_seq && !raised && !pnr_violation) { pnr_violation = true; pnr_fault_mpc = cur_pc; }
+    failf(R_EXT_NOT_IN_LOG);
+    return 0;
+  }
   return v;
 }
 uint32_t Machine::ext16_or_zero(int off) {
@@ -125,6 +135,7 @@ uint32_t Machine::imm_at(const uisa_fuop &u) {
 uint32_t Machine::load(int fc, uint32_t addr, int n) {
   uint32_t v;
   if (!mem->load(fc, addr, n, v)) {
+    if (pnr_seq && !raised && !pnr_violation) { pnr_violation = true; pnr_fault_mpc = cur_pc; }
     char b[64];
     snprintf(b, sizeof b, "load %d @%08x", n, addr);
     if (fail == R_MATCH) { fail = R_LOAD_NOT_IN_LOG; why = b; }
@@ -222,7 +233,20 @@ void Machine::step(const uisa_fuop &u) {
   uint32_t b = o.reads_rs2 ? R[u.rs2] : immv;
   int space = SPACES.space[u.op];
   if (o.is_probe) {
-    R[u.rd] = mem->probe(fc_space(space, true), a + immv, SPACES.probe_w[u.op]);
+    int fc = fc_space(space, true);
+    uint32_t mmusr = mem->probe(fc, a + immv, SPACES.probe_w[u.op]);
+    R[u.rd] = mmusr;
+    if (o.writes_u) {                            // .us: u = ok; .ua: u = u && ok
+      // ok (spec probe_ok): with translation off (TC.E = 0) an MMUSR of 0
+      // means no TTR matched, so the access is untranslated and succeeds;
+      // a TTR match (TC.E either way) has T and R set and W from the TTR
+      bool ok = PROBE_OK(mmusr, SPACES.probe_w[u.op], !(fc & 4), (csr[UISA_CTL_TC] & 0x8000) != 0);
+      U = o.reads_u ? (U && ok) : ok;
+    }
+  } else if ((o.is_load || o.is_store) && o.reads_u && !U) {
+    // ld.c / st.c / stu.c with u clear: no access at all (no translation, no
+    // fault, nothing logged); a load writes rd = 0, a store writes nothing
+    if (o.is_load) R[u.rd] = 0;
   } else if (o.is_load && o.is_store) {         // cas: compare-and-swap (as SPARC CASA)
     int fc = fc_space(space, true);
     uint32_t addr = a + immv, n = o.mem_bytes;
@@ -250,6 +274,8 @@ void Machine::step(const uisa_fuop &u) {
     } else {
       store(fc, a + immv, o.mem_bytes, R[u.rd]);
     }
+  } else if (o.unit == UNIT_FPU) {
+    fpop(u);
   } else if (o.gform != GF_NONE) {
     gop_out g = gop_eval(o.gfn, o.gsize_bits, a, b, X, N, Z, V, C);
     if (o.writes_rd) R[u.rd] = gop_writeback(o.gform, o.gsize_bits, R[u.rd], g.r);
@@ -261,19 +287,118 @@ void Machine::step(const uisa_fuop &u) {
   } else {
     base(u, a, b, immv);
   }
+  if (o.lock_begin) locked = true;
+  if (o.lock_end || u.op == UISA_UNLOCK) locked = false;   // stu.c.*: whether or not it stored
   R[0] = 0;
+}
+
+
+// ---- floating point (spec FP ops) ------------------------------------------
+// IEEE 754 binary64 / binary32 on the host, under the FPCR's rounding mode,
+// with the spec's NaN rules applied explicitly (an AArch64 host already
+// follows them; its double arithmetic is q800sim's). The exceptions the host
+// raises are ORed into fflags (CSR 0x23: NV 4, DZ 3, OF 2, UF 1, NX 0):
+// underflow is the host's (AArch64: tininess before rounding).
+namespace {
+inline uint64_t d2u(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
+inline double u2d(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
+inline uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+inline float u2f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+inline bool nan64(uint64_t x) { return (x & 0x7fffffffffffffffull) > 0x7ff0000000000000ull; }
+inline bool snan64(uint64_t x) { return nan64(x) && !(x & 0x0008000000000000ull); }
+inline bool nan32(uint32_t x) { return (x & 0x7fffffffu) > 0x7f800000u; }
+inline bool snan32(uint32_t x) { return nan32(x) && !(x & 0x00400000u); }
+// the NaN result of a two-operand op with a NaN operand
+inline uint64_t pick_nan64(uint64_t a, uint64_t b) {
+  if (snan64(a)) return a | 0x0008000000000000ull;
+  if (snan64(b)) return b | 0x0008000000000000ull;
+  return nan64(a) ? a : b;
+}
+inline uint32_t pick_nan32(uint32_t a, uint32_t b) {
+  if (snan32(a)) return a | 0x00400000u;
+  if (snan32(b)) return b | 0x00400000u;
+  return nan32(a) ? a : b;
+}
+const uint64_t DNAN64 = 0x7ff8000000000000ull;
+const uint32_t DNAN32 = 0x7fc00000u;
+}  // namespace
+
+void Machine::fpop(const uisa_fuop &u) {
+  static const int modes[4] = {FE_TONEAREST, FE_TOWARDZERO, FE_DOWNWARD, FE_UPWARD};
+  const uint64_t a = F[u.rs1 & 15], b = F[u.rs2 & 15];
+  uint64_t r = 0;
+  bool wf = true;            // writes an FP register
+  if (u.rd > 15 && u.op != UISA_FGETHI && u.op != UISA_FGETLO) { failf(R_UNSUPPORTED_UOP, "FP register %u", u.rd); return; }
+  if (u.rs1 > 15 && u.op != UISA_FSETHI && u.op != UISA_FSETLO) { failf(R_UNSUPPORTED_UOP, "FP register %u", u.rs1); return; }
+  switch (u.op) {
+  case UISA_FMOV_D: r = a; break;
+  case UISA_FNEG_D: r = a ^ 0x8000000000000000ull; break;
+  case UISA_FABS_D: r = a & 0x7fffffffffffffffull; break;
+  case UISA_FSETHI: r = (F[u.rd & 15] & 0xffffffffull) | ((uint64_t)R[u.rs1] << 32); break;
+  case UISA_FSETLO: r = (F[u.rd & 15] & 0xffffffff00000000ull) | R[u.rs1]; break;
+  case UISA_FGETHI: wf = false; if (u.rd) R[u.rd] = (uint32_t)(a >> 32); break;
+  case UISA_FGETLO: wf = false; if (u.rd) R[u.rd] = (uint32_t)a; break;
+  default: {
+    std::feclearexcept(FE_ALL_EXCEPT);
+    std::fesetround(modes[(csr[0x20] >> 4) & 3]);
+    volatile double da = u2d(a), db = u2d(b);
+    volatile float fa = u2f((uint32_t)a), fb = u2f((uint32_t)b);
+    switch (u.op) {
+    case UISA_FADD_D: r = d2u(da + db); break;
+    case UISA_FSUB_D: r = d2u(da - db); break;
+    case UISA_FMUL_D: r = d2u(da * db); break;
+    case UISA_FDIV_D: r = d2u(da / db); break;
+    case UISA_FSQRT_D: r = d2u(std::sqrt((double)da)); break;
+    case UISA_FMUL_S: r = f2u(fa * fb); break;
+    case UISA_FDIV_S: r = f2u(fa / fb); break;
+    case UISA_FCVT_S_D: r = f2u((float)da); break;
+    case UISA_FCVT_D_S: r = d2u((double)fa); break;
+    default: failf(R_UNSUPPORTED_UOP, "FP op %u", u.op); break;
+    }
+    int fe = std::fetestexcept(FE_ALL_EXCEPT);
+    std::fesetround(FE_TONEAREST);
+    // the NaN rules, whatever the host's
+    switch (u.op) {
+    case UISA_FADD_D: case UISA_FSUB_D: case UISA_FMUL_D: case UISA_FDIV_D:
+      if (nan64(a) || nan64(b)) r = pick_nan64(a, b);
+      else if (nan64(r)) r = DNAN64;
+      break;
+    case UISA_FSQRT_D:
+      if (nan64(a)) r = a | 0x0008000000000000ull;
+      else if (nan64(r)) r = DNAN64;
+      break;
+    case UISA_FMUL_S: case UISA_FDIV_S:
+      if (nan32((uint32_t)a) || nan32((uint32_t)b)) r = pick_nan32((uint32_t)a, (uint32_t)b);
+      else if (nan32((uint32_t)r)) r = DNAN32;
+      break;
+    case UISA_FCVT_S_D:
+      if (nan64(a)) r = (uint32_t)((a >> 32) & 0x80000000u) | 0x7fc00000u | (uint32_t)((a >> 29) & 0x3fffffu);
+      break;
+    case UISA_FCVT_D_S:
+      if (nan32((uint32_t)a))
+        r = ((uint64_t)(a & 0x80000000u) << 32) | 0x7ff8000000000000ull | ((uint64_t)(a & 0x3fffffu) << 29);
+      break;
+    }
+    csr[0x23] |= ((fe & FE_INVALID) ? 16u : 0u) | ((fe & FE_DIVBYZERO) ? 8u : 0u) | ((fe & FE_OVERFLOW) ? 4u : 0u) |
+                 ((fe & FE_UNDERFLOW) ? 2u : 0u) | ((fe & FE_INEXACT) ? 1u : 0u);
+    break;
+  }
+  }
+  if (wf) F[u.rd & 15] = r;
 }
 
 void Machine::base(const uisa_fuop &u, uint32_t a, uint32_t b, uint32_t IMM) {
   const opinfo &o = OPS[u.op];
   uint32_t r = 0, pc = cur_pc, npc = cur_pc + 4;
   uint32_t OLD = R[u.rd];
-  const bool xin = X, nin = N, zin = Z, vin = V, cin = C;
-  (void)OLD; (void)IMM; (void)xin; (void)nin; (void)zin; (void)vin; (void)cin;
+  const bool xin = X, nin = N, zin = Z, vin = V, cin = C, uin = U;
+  (void)OLD; (void)IMM; (void)xin; (void)nin; (void)zin; (void)vin; (void)cin; (void)uin;
 #define GPC_INSN gpc_insn
 #define GNPC_SET(v) do { gnpc = (v); gnpc_set = true; } while (0)
-#define GREG_READ(i) R[G_D + (i)]
-#define GREG_WRITE(i, v) (R[G_D + (i)] = (v))
+// rdg/wrg reach only the guest registers, indices 0-17 (D0-D7, A0-A7, gpc,
+// gsr); 18-31 is a millicode fault
+#define GREG_READ(i) greg_read(i)
+#define GREG_WRITE(i, v) greg_write((i), (v))
 #define CSR_READ(i) csr[(i) & 0xff]
 #define CSR_WRITE(i, v) (csr[(i) & 0xff] = (v))
 #define CSTACK_PUSH(v) cstack_push(v)
@@ -294,6 +419,22 @@ void Machine::base(const uisa_fuop &u, uint32_t a, uint32_t b, uint32_t IMM) {
   }
   if (o.writes_rd) R[u.rd] = r;
   next_pc = npc;
+}
+
+bool Machine::guest_write(const uisa_fuop &u) const {
+  const opinfo &o = OPS[u.op];
+  // guest-space store (gpushr, cas included); a conditional store (st.c,
+  // stu.c) only if it stored: u was set (the store does not change u)
+  if (o.is_store) return SPACES.space[u.op] != 0 && (!o.reads_u || U);
+  if (o.writes_rd && u.rd >= G_D && u.rd <= G_SR) return true;    // D0-D7, A0-A7, gpc, gsr
+  if ((o.writes_nzvc || o.writes_x) && o.flags_on) return true;    // the flags
+  if (u.op == UISA_WRG) return true;
+  // VBR..MSP, the FP control registers (not fflags, the FP ops' scratch flags)
+  if ((u.op == UISA_CSRW || u.op == UISA_CSRS || u.op == UISA_CSRC) && (u.imm & 0xff) < 0x40 &&
+      (u.imm & 0xff) != 0x23)
+    return true;
+  if (o.unit == UNIT_FPU && (o.fpregs & 1) && u.rd < 8) return true;   // FP0-FP7
+  return false;
 }
 
 void Machine::cstack_push(uint32_t v) {
@@ -364,7 +505,9 @@ void Machine::run_from(uint32_t mpc) {
     uisa_fuop u = {(uint16_t)d.op, d.rd, d.rs1, d.rs2, IK_CONST, 0, (int32_t)d.imm};
     cur_pc = mpc;
     next_pc = mpc + 4;
+    mc_seq++;
     step(u);
+    if (!pnr_seq && !raised && fail == R_MATCH && guest_write(u)) { pnr_seq = mc_seq; pnr_mpc = mpc; }
     mpc = next_pc;
   }
 }
@@ -522,6 +665,17 @@ void setup(Machine &m, Mem &mem, uint16_t op, const uisa_m68k_state &pre) {
   m.R[G_SR] = pre.sr & 0xff00;
   m.X = (pre.sr >> 4) & 1; m.N = (pre.sr >> 3) & 1; m.Z = (pre.sr >> 2) & 1;
   m.V = (pre.sr >> 1) & 1; m.C = pre.sr & 1;
+  m.U = false;
+  m.locked = false;
+  memset(m.F, 0, sizeof m.F);
+  m.fp_valid = pre.fp_valid == UISA_FP_VALID;
+  if (m.fp_valid) {
+    for (int i = 0; i < 8; i++) m.F[i] = pre.fp[i];
+    m.csr[0x20] = pre.fpcr;
+    m.csr[0x21] = pre.fpsr;
+    m.csr[0x22] = pre.fpiar;
+    m.csr[0x24] = pre.fpused;
+  }
   m.cur_op = op;
   m.gpc_insn = pre.pc;
   m.gnpc_set = false;
@@ -542,6 +696,15 @@ uint32_t exec_flow(Machine &m, const Flow &f) {
       if (x.rd == G_XREG2) x.rd = (uint8_t)f.xreg2;
       if (x.rs1 == G_XREG2) x.rs1 = (uint8_t)f.xreg2;
       if (x.rs2 == G_XREG2) x.rs2 = (uint8_t)f.xreg2;
+      if (x.op == UISA_GFAULT || x.op == UISA_GFAULTR) {
+        // a decode-time exception (ILLEGAL, LINE-A, LINE-F flows): the
+        // instruction does not retire; the frame stacks its own PC
+        m.R[G_PC] = m.gpc_insn;
+        m.raise(x.op == UISA_GFAULT ? x.imm : m.R[x.rs1]);
+        m.run_from(MC_BASE + MC_EP_EXCEPTION);
+        mc_insns_total += m.mc_insns;
+        return m.R[G_PC];
+      }
       m.step(x);
     }
     model_pc = m.gnpc_set ? m.gnpc : m.gpc_insn + f.ilen + m.full_extra;
@@ -591,6 +754,14 @@ void writeback(const Machine &m, uint32_t model_pc, uisa_m68k_state &s) {
   s.pc = model_pc;
   s.sr = (uint16_t)((m.R[G_SR] & 0xff00) | CCR_PACK(m.X, m.N, m.Z, m.V, m.C));
   for (int i = 0; i < UISA_CTL_NUM; i++) s.ctl[i] = m.csr[i];
+  if (m.fp_valid) {
+    s.fp_valid = UISA_FP_VALID;
+    for (int i = 0; i < 8; i++) s.fp[i] = m.F[i];
+    s.fpcr = m.csr[0x20];
+    s.fpsr = m.csr[0x21];
+    s.fpiar = m.csr[0x22];
+    s.fpused = m.csr[0x24];
+  }
 }
 
 int active_stack(uint16_t sr) {
@@ -606,6 +777,13 @@ int compare_regs(const Machine &m, const uisa_m68k_state &post, uint32_t model_p
   if (model_pc != post.pc) return R_MISMATCH_PC;
   for (int i = 0; i < UISA_CTL_NUM; i++)
     if (i != active_stack(post.sr) && m.csr[i] != post.ctl[i]) return R_MISMATCH_CTL;
+  if (m.fp_valid && post.fp_valid == UISA_FP_VALID) {
+    for (int i = 0; i < 8; i++)
+      if (m.F[i] != post.fp[i]) return R_MISMATCH_FP;
+    if (m.csr[0x20] != post.fpcr || m.csr[0x21] != post.fpsr || m.csr[0x22] != post.fpiar ||
+        m.csr[0x24] != post.fpused)
+      return R_MISMATCH_FP;
+  }
   return R_MATCH;
 }
 

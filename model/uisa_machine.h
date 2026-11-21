@@ -50,6 +50,7 @@ enum {
   R_EXCEPTION,          // unused (exceptions are now modelled and compared)
   R_NATIVE,             // millicode operation with no routine yet (not compared)
   R_ABORTED,            // pre without post: the host took a fault mid-instruction
+  R_MISMATCH_FP,        // FP0-FP7, FPCR, FPSR, FPIAR or fpused
   R_NUM
 };
 extern const char *const R_NAMES[R_NUM];
@@ -73,7 +74,18 @@ struct Machine {
   Mem *mem = nullptr;
   uint32_t R[64];
   uint32_t csr[256];
+  // the FP registers f0-f15 (spec `fp_regs`): f0-f7 the guest's FP0-FP7 as
+  // IEEE doubles, f8-f15 millicode temporaries
+  uint64_t F[16];
+  // the host state carries the FPU (uisa_m68k_state fp_valid)
+  bool fp_valid = false;
   bool N, Z, V, C, X;
+  // the millicode predicate u (spec `flags`): written by probe .us/.ua, read
+  // by ld.c / st.c / stu.c and b.u / b.nu. Never guest-visible: not part of
+  // the CCR, not compared, not saved; it starts clear.
+  bool U = false;
+  // a locked sequence is open (ldl.* to stu.*, stu.c.* or unlock)
+  bool locked = false;
   uint16_t cur_op;
   uint32_t gpc_insn;
   uint32_t gnpc;
@@ -87,6 +99,17 @@ struct Machine {
   unsigned trap_vec = 0;   // a trap a guest uop raised, taken once the instruction retires
   uint32_t vector = 0;
   uint32_t mc_insns = 0;
+  // Point of no return (millicode): once a routine makes its first
+  // guest-visible write (a guest register, the flags, a guest CSR or a
+  // guest-space store), nothing may fault, or the 68k instruction could not
+  // be restarted. mc_seq numbers the millicode uops run (from 1); pnr_seq is
+  // the one that made the first write (0: none yet). Exception and interrupt
+  // entry flows are exempt: a fault while stacking a frame is a double fault.
+  uint32_t mc_seq = 0;
+  uint32_t pnr_seq = 0, pnr_mpc = 0;
+  bool pnr_violation = false;
+  uint32_t pnr_fault_mpc = 0;
+  bool guest_write(const uisa_fuop &u) const;
   // full-format extension words seen by the length decoder
   int full_n = 0;
   int full_off[2];
@@ -111,6 +134,15 @@ struct Machine {
   uint32_t full_ea(int off, uint32_t base);
   void step(const uisa_fuop &u);
   void base(const uisa_fuop &u, uint32_t a, uint32_t b, uint32_t IMM);
+  void fpop(const uisa_fuop &u);
+  uint32_t greg_read(uint32_t i) {
+    if (i > 17) { failf(R_UNSUPPORTED_UOP, "rdg index %u: not a guest register", i); return 0; }
+    return R[G_D + i];
+  }
+  void greg_write(uint32_t i, uint32_t v) {
+    if (i > 17) { failf(R_UNSUPPORTED_UOP, "wrg index %u: not a guest register", i); return; }
+    R[G_D + i] = v;
+  }
   void cstack_push(uint32_t v);
   uint32_t cstack_pop();
   void raise(uint32_t vec);

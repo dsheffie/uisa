@@ -85,6 +85,8 @@ class Expander:
         """Return (src, dst) as (mode name, reg number) pairs, or None."""
         lo, hi = op & 7, (op >> 9) & 7
         line, m = op >> 12, ins.mnem
+        if m in ("ILLEGAL", "LINE-A", "LINE-F", "EXG"):    # a fault uop, or {Rx}/{Ry}
+            return None, None
 
         def lo_ea():
             return (ins.src or ins.dst, lo)
@@ -130,6 +132,8 @@ class Expander:
     # --- operations -----------------------------------------------------------
     def op_key(self, op, ins):
         m = ins.mnem
+        if m in ("ILLEGAL", "LINE-A", "LINE-F"):
+            return m
         if op >> 12 == 6:
             return "BRA" if m == "BRA" else "BSR" if m == "BSR" else "Bcc"
         if m.startswith("DB"):
@@ -211,16 +215,17 @@ class Expander:
             size = "W"
         w = SIZE_BITS[size]
         src, dst = self.roles(op, ins)
+        # addressing-mode legality is the decoder's (m68kdec._legal): an
+        # opword that reaches here has modes its operation allows
         if (src and src[0] is None) or (dst and dst[0] is None):
-            return Flow("illegal", note="invalid addressing mode")
-        if spec.get("src") == "addr" and src and src[0] in ("Dn", "An", "#imm", "#q"):
-            return Flow("illegal", note="needs a control addressing mode")
-        if dst and dst[0] == "#imm" or (dst and dst[0] in ("(d16,PC)", "(d8,PC,Xn)") and spec.get("dst") in ("write", "rmw")):
-            return Flow("illegal", note="destination is not alterable")
+            raise AssertionError("%04x: the decoder passed an invalid addressing mode" % op)
         lay = self.ext_layout(src, dst, size)
         uops, post = [], []
         b = {"{w}": str(w), "{g}": spec.get("g", ""), "{T}": self.t["t4"],
-             "{len}": str(m68kdec.length(op)[0]), "{A}": "a%d" % (op & 7), "{X}": "d%d" % ((op >> 9) & 7)}
+             "{len}": str(m68kdec.length(op)[0]), "{A}": "a%d" % (op & 7), "{X}": "d%d" % ((op >> 9) & 7),
+             # EXG: opmode 01000 Dx,Dy; 01001 Ax,Ay; 10001 Dx,Ay
+             "{Rx}": "%s%d" % ("a" if op & 0xf8 == 0x48 else "d", (op >> 9) & 7),
+             "{Ry}": "%s%d" % ("d" if op & 0xf8 == 0x40 else "a", op & 7)}
         q = (op >> 9) & 7 or 8
         if op >> 12 == 7:
             q = sext8(op & 0xFF)
@@ -539,6 +544,35 @@ def check(spec, flow):
     return errs
 
 
+def labeled_variants(ex, op):
+    """The second-level-decode flows of an opword, as (label, flow, compact)
+    in display order; compact flows (MOVEC) print on one line."""
+    out = []
+    vs = ex.bf_variants(op) or {}
+    for n, v in vs.items():
+        if n in (2, 3, 4) and v is vs[1] or (n == "long" and v is vs[1 if op & 0x38 == 0 else 4]):
+            continue
+        what = "whole long" if n == "long" else ("register" if op & 0x38 == 0 else "field in %d byte%s" % (n, "s" if n > 1 else ""))
+        out.append(("immediate offset/width, %s" % what, v, False))
+    for n, v in enumerate(ex.mull_variants(op) or []):
+        out.append((("unsigned 32", "unsigned 64", "signed 32", "signed 64")[n], v, False))
+    for n, v in enumerate(ex.moves_variants(op) or []):
+        out.append(("S = 1, %s" % ("<ea>,Dn", "<ea>,An", "Rn,<ea>")[n], v, False))
+    for v in ex.cas_variants(op) or []:
+        out.append(("memory-alterable <ea>", v, False))
+    for n, v in enumerate(ex.divl_variants(op) or []):
+        if v:
+            out.append(("%s 32-bit dividend%s" % ("signed" if n & 2 else "unsigned", ", quotient only" if n & 4 else ""), v, False))
+    for n, v in enumerate(ex.sr_variants(op) or []):
+        what = ("; new S = 1", "; new S = 0")[n] if op == 0x46FC else ""
+        out.append(("S = 1, M = 0%s" % what, v, False))
+    mv = ex.movec_variants(op) or {}
+    for n, v in mv.items():
+        if v:
+            out.append(("%s (S = 1, M = 0)" % ex.f["movec"]["regs"][n], v, True))
+    return out
+
+
 def cmd_show(a):
     ex, spec = Expander(), uisa.load()
     for h in a.ops:
@@ -549,55 +583,15 @@ def cmd_show(a):
             print("        " + u)
         for e in check(spec, fl) if fl.kind == "pla" else []:
             print("   !! " + e)
-        vs = ex.bf_variants(op) or {}
-        for n, v in vs.items():
-            if n in (2, 3, 4) and v is vs[1] or (n == "long" and v is vs[1 if op & 0x38 == 0 else 4]):
-                continue
-            what = "whole long" if n == "long" else ("register" if op & 0x38 == 0 else "field in %d byte%s" % (n, "s" if n > 1 else ""))
-            print("      immediate offset/width, %s: %d uops" % (what, v.count))
-            for u in v.uops:
-                print("          " + u)
-            for e in check(spec, v):
-                print("   !! " + e)
-        for n, v in enumerate(ex.mull_variants(op) or []):
-            print("      %s: %d uops" % (("unsigned 32", "unsigned 64", "signed 32", "signed 64")[n], v.count))
-            for u in v.uops:
-                print("          " + u)
-            for e in check(spec, v):
-                print("   !! " + e)
-        for n, v in enumerate(ex.moves_variants(op) or []):
-            print("      S = 1, %s: %d uops" % (("<ea>,Dn", "<ea>,An", "Rn,<ea>")[n], v.count))
-            for u in v.uops:
-                print("          " + u)
-            for e in check(spec, v):
-                print("   !! " + e)
-        for v in ex.cas_variants(op) or []:
-            print("      memory-alterable <ea>: %d uops" % v.count)
-            for u in v.uops:
-                print("          " + u)
-            for e in check(spec, v):
-                print("   !! " + e)
-        for n, v in enumerate(ex.divl_variants(op) or []):
-            if v:
-                print("      %s 32-bit dividend%s: %d uops" % ("signed" if n & 2 else "unsigned", ", quotient only" if n & 4 else "", v.count))
+        for label, v, compact in labeled_variants(ex, op):
+            if compact:
+                print("      %s: %s" % (label, "; ".join(v.uops)))
+            else:
+                print("      %s: %d uops" % (label, v.count))
                 for u in v.uops:
                     print("          " + u)
-                for e in check(spec, v):
-                    print("   !! " + e)
-        for n, v in enumerate(ex.sr_variants(op) or []):
-            what = ("; new S = 1", "; new S = 0")[n] if op == 0x46FC else ""
-            print("      S = 1, M = 0%s: %d uops" % (what, v.count))
-            for u in v.uops:
-                print("          " + u)
             for e in check(spec, v):
                 print("   !! " + e)
-        mv = ex.movec_variants(op) or {}
-        for n, v in mv.items():
-            if v:
-                print("      %s (S = 1, M = 0): %s" % (ex.f["movec"]["regs"][n], "; ".join(v.uops)))
-                for e in check(spec, v):
-                    print("   !! " + e)
-
 
 def cmd_check(a):
     ex, spec = Expander(), uisa.load()

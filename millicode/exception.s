@@ -11,6 +11,11 @@
 ;   Access faults (vector 2) take the format 7 frame fields from the fault_*
 ;   and wb* CSRs.
 ; The call stack is empty on entry.
+; The frame's longwords at word (not longword) offsets -- the PC at 2, the
+; format 2 address at 8 -- are stored and loaded as two words: a 68k stack
+; pointer is only word-aligned in general (an exception frame alone moves it
+; by 8 or 12), and an implementation may require natural alignment for a
+; longword access (superdupersparc's core does).
 
 exception:
         call    exc_enter
@@ -31,7 +36,9 @@ exception:
         jal     x0, exc_frame
 exc_fmt2:
         addi    a7, a7, -12
-        st.32.gd x3, 8(a7)
+        srli    x5, x3, 16              ; the instruction address, as two words
+        st.16.gd x5, 8(a7)
+        st.16.gd x3, 10(a7)
         ori     x14, x14, 0x2000        ; format 2
         jal     x0, exc_frame
 ; Format 7 (access error), 30 words, from the fault CSRs.
@@ -68,7 +75,9 @@ exc_fmt7:
         or      x14, x14, x5
 exc_frame:
         st.16.gd x10, 0(a7)
-        st.32.gd x2, 2(a7)
+        srli    x5, x2, 16              ; the PC, as two words
+        st.16.gd x5, 2(a7)
+        st.16.gd x2, 4(a7)
         st.16.gd x14, 6(a7)
         add     gpc, x13, x0
         gexit
@@ -147,7 +156,10 @@ rte:
         andi    x9, gsr, 0x2000
         b.eq    x9, x0, privilege
         ld.16u.gd x10, 0(a7)            ; SR
-        ld.32.gd x20, 2(a7)             ; PC (set_sr uses x11-x15)
+        ld.16u.gd x20, 2(a7)            ; PC, as two words (set_sr uses x11-x15)
+        ld.16u.gd x5, 4(a7)
+        slli    x20, x20, 16
+        or      x20, x20, x5
         ld.16u.gd x12, 6(a7)            ; format / vector offset
         srli    x13, x12, 12
         b.eq    x13, x0, rte_8

@@ -10,7 +10,32 @@ import yaml
 
 SPEC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "spec", "uisa.yaml")
 
-FLAG_RESOURCE = {"N": "nzvc", "Z": "nzvc", "V": "nzvc", "C": "nzvc", "X": "x"}
+FLAG_RESOURCE = {"N": "nzvc", "Z": "nzvc", "V": "nzvc", "C": "nzvc", "X": "x", "U": "u"}
+
+# The probe forms of the MP format's um field: (um, mnemonic suffix, what the
+# probe does to u). um 3 is reserved and decodes as illegal.
+PROBE_U_FORMS = [(0, "", None), (1, ".us", "set"), (2, ".ua", "and")]
+
+
+def sem_flag_use(sem):
+    """(reads u, writes u) from a `sem` snippet: uin is u before the op, U the
+    u it writes (spec `flags`). Guarded writes count as writes."""
+    from gen_smt import tokenize   # noqa: E402 (lazy: gen_smt imports this module)
+    toks = tokenize(sem or "")
+    reads = "uin" in toks
+    writes = any(t == "U" and k + 1 < len(toks) and toks[k + 1] in ("=", "&=", "|=")
+                 for k, t in enumerate(toks))
+    return reads, writes
+
+
+def check_u_decl(what, sem, reads_flags, writes_flags):
+    """The declared u reads/writes of an op must match its semantics."""
+    r, w = sem_flag_use(sem)
+    if r != ("u" in reads_flags) or w != ("u" in writes_flags):
+        raise SpecError("%s: declares u %s/%s, its semantics %s u and %s it"
+                        % (what, "read" if "u" in reads_flags else "not read",
+                           "written" if "u" in writes_flags else "not written",
+                           "read" if r else "do not read", "write" if w else "do not write"))
 
 
 class SpecError(Exception):
@@ -96,6 +121,9 @@ class Spec:
         self.csr_by_num = {c["num"]: c["name"] for c in self.csrs}
         self.regs = self._build_regs(d["reg_classes"])
         self.reg_by_index = {v: k for k, v in self.regs.items()}
+        # FP registers: their own namespace, named by the fields an op lists in `fp`
+        self.fp_regs = self._build_regs(d.get("fp_regs", []))
+        self.fp_reg_by_index = {v: k for k, v in self.fp_regs.items()}
         self.variants = []
         self._expand_base(d["base_ops"])
         self._expand_mem(d["mem_ops"])
@@ -110,7 +138,7 @@ class Spec:
         for c in classes:
             if "prefix" in c:
                 for i in range(c["count"]):
-                    regs["%s%d" % (c["prefix"], i)] = c["base"] + i
+                    regs["%s%d" % (c["prefix"], c.get("first", 0) + i)] = c["base"] + i
             else:
                 regs[c["name"]] = c["base"]
         if len(set(regs.values())) != len(regs):
@@ -128,6 +156,9 @@ class Spec:
     def _expand_base(self, ops):
         for op in ops:
             fmt = self.formats[op["fmt"]]
+            check_u_decl("base op %s" % op.get("name", op.get("family")), op.get("sem"),
+                         self._flag_resources(op.get("reads_flags", [])),
+                         self._flag_resources(op.get("writes_flags", [])))
             common = dict(kind="base", unit=op.get("unit", "alu"), sem=op.get("sem"),
                           desc=op.get("desc", ""), note=op.get("note", ""),
                           cti=op.get("cti"), serialize=op.get("serialize", False),
@@ -137,7 +168,11 @@ class Spec:
                           imm_max=op.get("imm_max"),
                           reads_flags=self._flag_resources(op.get("reads_flags", [])),
                           writes_flags=self._flag_resources(op.get("writes_flags", [])),
+                          fp=tuple(op.get("fp", [])),
                           major=op["major"], family=op.get("family", op.get("name")))
+            for f in op.get("fp", []):
+                if f not in ("rd", "rs1", "rs2") or f not in op["asm"]:
+                    raise SpecError("base op %s: fp field %s is not one of its register operands" % (op.get("name"), f))
             if "per_cond" in op:
                 conds = self.guest_conds if op["per_cond"] == "guest" else self.base_conds
                 for c in conds:
@@ -166,11 +201,32 @@ class Spec:
         for op in ops:
             wb = op.get("writeback")
             cas = op["kind"] == "cas"
-            fmt = self.formats["MC" if cas else "MW" if wb else "M"]
-            for sp in self.spaces:
+            fmt = self.formats[op.get("fmt") or ("MC" if cas else "MW" if wb else "M")]
+            reads_flags = self._flag_resources(op.get("reads_flags", []))
+            writes_flags = self._flag_resources(op.get("writes_flags", []))
+            if op.get("u_forms"):
+                # probes: the um forms set their u reads/writes; the sem covers all three
+                if reads_flags or writes_flags or sem_flag_use(op.get("sem")) != (True, True):
+                    raise SpecError("mem op %s: u_forms declares u through um; its sem must read and write u"
+                                    % op["name"])
+                if "um" not in fmt.fields:
+                    raise SpecError("mem op %s: u_forms needs a format with an um field" % op["name"])
+                uforms = PROBE_U_FORMS
+            else:
+                check_u_decl("mem op %s" % op["name"], op.get("sem"), reads_flags, writes_flags)
+                uforms = [(None, "", None)]
+            for (um, usuf, umode), sp in [(f, s) for f in uforms for s in self.spaces]:
                 fixed = {"op": self.majors[op["major"]], "sp": sp["code"]}
-                if "sz" in op:
-                    fixed["sz"] = op["sz"]
+                for k in ("sz", "lk", "ul"):
+                    if k in op:
+                        if k not in fmt.fields:
+                            raise SpecError("mem op %s: field %s not in format %s" % (op["name"], k, fmt.name))
+                        fixed[k] = op[k]
+                rf, wf = reads_flags, writes_flags
+                if um is not None:
+                    fixed["um"] = um
+                    rf = ["u"] if umode == "and" else []
+                    wf = ["u"] if umode else []
                 if wb:
                     operands = ["rs2", "mem"]    # data in rs2; rd = rs1 gets the new address
                 elif cas:
@@ -182,9 +238,10 @@ class Spec:
                              space=sp["name"], desc=op.get("desc", ""), sem=None, writeback=wb,
                              cti=None, serialize=op.get("locked") is not None or cas, tied=bool(wb),
                              reads_rd=cas,
-                             imm_signed=True, imm_max=None, reads_flags=[], writes_flags=[],
-                             major=op["major"], family=op["name"])
-                self._add(Variant("%s.%s" % (op["name"], sp["suffix"]), fmt, fixed, operands, **attrs))
+                             imm_signed=True, imm_max=None, reads_flags=rf, writes_flags=wf,
+                             conditional="u" in rf and op["kind"] in ("load", "store"), umode=umode,
+                             fp=(), major=op["major"], family=op["name"])
+                self._add(Variant("%s%s.%s" % (op["name"], usuf, sp["suffix"]), fmt, fixed, operands, **attrs))
 
     def _expand_guest(self, ops):
         fns = set()
@@ -196,6 +253,21 @@ class Spec:
             sizes = op.get("sizes", [8, 16, 32])
             reads = self._flag_resources(op.get("reads", []))
             writes = self._flag_resources(op.get("writes", []))
+            # The flag resources each variant reads, derived from the semantics by
+            # gen_sv's dependence analysis (data and control dependence of the
+            # result, the trap and the written flags on xin..cin): a .nf variant
+            # still reads what its result depends on (X for addx, roxl, the BCD
+            # ops, ...). The family's declared `reads` must match its flag-writing
+            # form, so the spec's documentation cannot drift from the semantics.
+            from gen_sv import flag_reads, parse   # noqa: E402 (lazy: gen_sv imports this module)
+            (nf_nzvc, nf_x), (on_nzvc, on_x) = flag_reads(parse(op["sem"]), "X" in op.get("writes", []))
+            reads_nf = [r for r, b in (("nzvc", nf_nzvc), ("x", nf_x)) if b]
+            reads_on = [r for r, b in (("nzvc", on_nzvc), ("x", on_x)) if b]
+            if sorted(reads) != sorted(reads_on):
+                raise SpecError("guest op %s: declared reads %s, its semantics read %s"
+                                % (op["name"], reads, reads_on))
+            if "u" in reads + writes or sem_flag_use(op["sem"]) != (False, False):
+                raise SpecError("guest op %s: the millicode predicate u is not a guest flag" % op["name"])
             forms = []   # (suffix, major, size, form, immediate)
             for n in sizes:
                 if kind in ("binary", "unary"):
@@ -241,8 +313,8 @@ class Spec:
                                  cti=None, serialize=False, tied=tied, gfn=op["fn"], gsize=n,
                                  gform=form, gkind=kind, unary=(kind == "unary"),
                                  imm_signed=False, imm_max=None,
-                                 reads_flags=reads if f else [], writes_flags=writes if f else [],
-                                 major=major, family=op["name"], flags_on=bool(f))
+                                 reads_flags=reads_on if f else reads_nf, writes_flags=writes if f else [],
+                                 fp=(), major=major, family=op["name"], flags_on=bool(f))
                     self._add(Variant(mnem, fmt, fixed, operands, **attrs))
 
     # --- checks ----------------------------------------------------------
@@ -272,6 +344,17 @@ class Spec:
         if (v.kind == "store" and not v.attrs.get("writeback")) or v.attrs.get("reads_rd"):
             r.append("rd")
         return r
+
+    def fp_fields(self, v):
+        """Register fields of this variant that name FP registers (spec `fp_regs`)."""
+        return set(v.attrs.get("fp", ()))
+
+    def int_reads(self, v):
+        """The register fields this variant reads that name x / guest registers."""
+        return [r for r in self.reads(v) if r not in self.fp_fields(v)]
+
+    def writes_int_rd(self, v):
+        return self.writes_rd(v) and "rd" not in self.fp_fields(v)
 
     def writes_rd(self, v):
         if v.kind == "store":
@@ -338,6 +421,12 @@ class Spec:
             raise SpecError("unknown register %r" % tok)
         return self.regs[tok]
 
+    def fp_reg(self, tok):
+        tok = tok.strip().lower()
+        if tok not in self.fp_regs:
+            raise SpecError("unknown FP register %r" % tok)
+        return self.fp_regs[tok]
+
     @staticmethod
     def num(tok):
         tok = tok.strip().lstrip("#")
@@ -365,9 +454,10 @@ class Spec:
         if len(toks) != len(v.operands):
             raise SpecError("%s expects operands %s" % (v.mnemonic, ", ".join(v.operands)))
         vals = {}
+        fpf = self.fp_fields(v)
         for kind, tok in zip(v.operands, toks):
             if kind in ("rd", "rs1", "rs2"):
-                vals[kind] = self.reg(tok)
+                vals[kind] = self.fp_reg(tok) if kind in fpf else self.reg(tok)
             elif kind == "mem":
                 m = re.match(r"^(.*)\((.+)\)$", tok)
                 if not m:
@@ -416,8 +506,11 @@ class Spec:
         if v is None:
             return ".word 0x%08x" % word
         out = []
+        fpf = self.fp_fields(v)
         for kind in v.operands:
-            if kind in ("rd", "rs1", "rs2"):
+            if kind in ("rd", "rs1", "rs2") and kind in fpf:
+                out.append(self.fp_reg_by_index.get(vals[kind], "fr%d" % vals[kind]))
+            elif kind in ("rd", "rs1", "rs2"):
                 out.append(self.reg_by_index.get(vals[kind], "r%d" % vals[kind]))
             elif kind == "mem":
                 out.append("%d(%s)" % (vals["imm"], self.reg_by_index.get(vals["rs1"], "r%d" % vals["rs1"])))

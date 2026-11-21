@@ -1,7 +1,7 @@
 # Which millicode routine handles each 68k operation that spec/flows.yaml
 # sends to millicode (keys are flows.yaml's millicode op names).
 # Operations without an entry still run natively in the shadow model.
-sources: [system.s, ea.s, integer.s, exception.s, bfwrite.s, divide.s, mmu.s, bitfield.c]   # .c: compiled by ucc (compiler/)
+sources: [system.s, ea.s, integer.s, exception.s, bfwrite.s, divide.s, mmu.s, bitfield.c, fpd.c]   # .c: compiled by ucc (compiler/)
 base: 0x0
 # Labels for the spec's entry points (spec/uisa.yaml entry_points).
 entries:
@@ -39,3 +39,8 @@ handlers:
   CPUSH: cache
   PFLUSH: pflush
   PTEST: ptest_insn
+  FPU-gen: fpd_gen
+  "FScc/FDBcc/FTRAPcc": fpd_cc
+  FBcc: fpd_bcc
+  FSAVE: fpd_save
+  FRESTORE: fpd_restore

@@ -1,6 +1,9 @@
 ; Effective-address helpers shared by millicode routines.
 ;
-; get_ext   x22 = extension-word offset (2, 4, 6 or 8)  ->  x18 = that word
+; get_ext   x22 = extension-word offset (even, >= 2)  ->  x18 = that word.
+;           Offsets 2-8 come from x2/x3 (filled at entry); later words (an
+;           instruction longer than 10 bytes: full-format base and outer
+;           displacements) are loaded from guest program space at gpc + x22.
 ; ea_addr   x20 = 6-bit EA field (mode << 3 | reg), x21 = operand size in
 ;           bytes, x22 = offset of the EA's first extension word
 ;           ->  x23 = address. For (An)+ / -(An): x24 = updated An, x25 = its
@@ -11,6 +14,8 @@
 ; correct x4 for the extra length). Nests at most three calls deep.
 
 get_ext:
+        addi    x18, x0, 8
+        b.ltu   x18, x22, get_ext_mem   ; past the words entry delivers
         bx      x22, 1, 2               ; offset 2, 4, 6, 8 -> slot 1, 2, 3, 0
         jal     x0, get_ext8
         jal     x0, get_ext2
@@ -27,6 +32,10 @@ get_ext6:
         ret
 get_ext8:
         zext16  x18, x3
+        ret
+get_ext_mem:
+        add     x18, gpc, x22           ; gpc = the instruction's address until gexit
+        ld.16u.gp x18, 0(x18)
         ret
 
 ea_addr:
@@ -230,6 +239,6 @@ ea_pcidx:
 
 commit_an:
         b.eq    x26, x0, commit_an_done
-        wrg     x25, x24
+        wrg     x25, x24                ; ubd-ok: x24, x25 (only when x26 != 0: ea_addr sets x26 = 1 only on its (An)+ / -(An) paths, after x24 and x25)
 commit_an_done:
         ret
