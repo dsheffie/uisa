@@ -437,7 +437,7 @@ inline void fmovem_data(u32 op, u32 cmd, u32 e01, u32 e23, u32 pc) {
       if (!(list & (0x80u >> r))) continue;
       u32 se = __ld_32_gd(b) >> 16;
       u64 m = ((u64)__ld_32_gd(b + 4) << 32) | __ld_32_gd(b + 8);
-      ft_put(r, ext_to_d_rm(se, m, rmode));
+      ft_put(r, d_canon(ext_to_d_rm(se, m, rmode)));   // (a NaN as from_d stores it)
       b = b + 12;
     }
     mark_used();
