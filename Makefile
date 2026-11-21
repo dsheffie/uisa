@@ -1,3 +1,5 @@
+# q800sim beside this checkout: its SoftFloat-3 submodule is the FPU tests' reference
+Q800SIM ?= ../q800sim
 # Regenerate everything from spec/uisa.yaml and run the checks.
 # Verilator's generated makefiles cannot live under a path containing spaces.
 VMDIR ?= /tmp/uisa_obj_tb_$(USER)
@@ -54,7 +56,9 @@ test: $(GEN) compiler
 	python3 compiler/prog/test_prog.py 100
 	python3 tests/softfloat/test_fx80.py 20000
 	python3 tests/fpu/test_fpu.py 20000
-	c++ -std=c++17 -O0 -frounding-math -Imillicode -o build/test_fpd_num tests/fpd/test_num.cc
+	$(MAKE) -C $(Q800SIM)/softfloat/build/Linux-x86_64-GCC >/dev/null
+	c++ -std=c++17 -O1 -Imillicode -I$(Q800SIM)/softfloat/source/include -DSOFTFLOAT_FAST_INT64 -DLITTLEENDIAN=1 -o build/test_fpd_num \
+		tests/fpd/test_num.cc $(Q800SIM)/softfloat/build/Linux-x86_64-GCC/softfloat.a
 	./build/test_fpd_num 100000
 	python3 tools/gen_model.py >/dev/null
 	python3 tools/gen_millicode.py >/dev/null

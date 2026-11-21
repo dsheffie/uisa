@@ -183,8 +183,9 @@ of an op are FP (`fp: [rd, rs1, rs2]`), and the decoder carries that as
 - `fadd.d fsub.d fmul.d fdiv.d fsqrt.d`, `fmul.s fdiv.s` (singles in bits
   31:0), `fcvt.s.d fcvt.d.s`: IEEE 754 under the FPCR's rounding mode (CSR
   `fpcr` bits 5:4, the 68k's order), denormals in full, tininess before
-  rounding, and AArch64's NaN rules (a signaling operand first, then the
-  first quiet one; the default NaN 0x7ff8000000000000). Each ORs the IEEE
+  rounding with UF for every tiny result (exact or not: the 68881's UNFL),
+  and the 68881's NaN rules (rs1's NaN, else rs2's, quieted; the default NaN
+  all ones, 0x7fffffffffffffff). Each ORs the IEEE
   exceptions it raises into CSR `fflags` (NV DZ OF UF NX); a read of `fflags`
   sees every older FP op's.
 - `fmov.d fneg.d fabs.d`: bit copies, no exceptions.
@@ -194,20 +195,23 @@ of an op are FP (`fp: [rd, rs1, rs2]`), and the decoder carries that as
   millicode loads and stores them as integers, so misaligned, uncached and
   faulting operands take the integer paths' mechanisms.
 
-These are the semantics of q800sim's FPU (host doubles on AArch64), which is
-the reference: the 68881's 80-bit values exist only in memory, converted by
-millicode at FMOVE.X / FMOVEM.X (`millicode/fpd_num.h`, q800sim's `to_d` /
-`from_d` exactly). `millicode/fpd.c` implements FPU-gen, FScc / FDBcc /
-FTRAPcc, FBcc, FSAVE and FRESTORE on them, q800sim's quirks included (see
-its header). The transcendentals, FMOD / FREM and packed decimal are not
+These are the semantics of q800sim's FPU (Berkeley SoftFloat-3 binary64
+with the 68881's NaN and underflow rules), which is the reference: the
+68881's 80-bit values exist only in memory, converted by millicode at
+FMOVE.X / FMOVEM.X (`millicode/fpd_num.h`, q800sim's `to_d` / `from_d`
+exactly). `millicode/fpd.c` implements FPU-gen, FScc / FDBcc / FTRAPcc,
+FBcc, FSAVE and FRESTORE on them (see its header): NaN operands are handled
+in software before any FP op runs, as q800sim does before calling
+SoftFloat. The transcendentals, FMOD / FREM and packed decimal are not
 there yet (`brk 30` / `brk 31`). Extended precision is double everywhere:
 every load of an extended value is rounded to a double (FMOVE.X to nearest,
 FMOVEM.X with the FPCR's rounding mode, as q800sim). CSRs `fpcr fpsr fpiar` are the 68881's registers; `fpused` is the
 FSAVE frame state (null until the FPU is used).
 
 The model (`model/uisa_machine.cc` `fpop`) computes the FP ops with the
-host's arithmetic and fenv, the NaN rules applied explicitly; its flags (the
-underflow's tininess rule in particular) are an AArch64 host's.
+host's arithmetic and fenv, the NaN rules applied explicitly; its flags are
+an AArch64 host's (tininess before rounding), plus UF for an exact subnormal
+result.
 `uisa_m68k_state` carries the FPU when `fp_valid` says so; without it the
 engine and the shadow leave coprocessor-1 instructions to the host.
 
