@@ -295,10 +295,11 @@ void Machine::step(const uisa_fuop &u) {
 
 // ---- floating point (spec FP ops) ------------------------------------------
 // IEEE 754 binary64 / binary32 on the host, under the FPCR's rounding mode,
-// with the spec's NaN rules applied explicitly (an AArch64 host already
-// follows them; its double arithmetic is q800sim's). The exceptions the host
+// with the spec's NaN rules applied explicitly (the 68881's order: rs1's NaN,
+// else rs2's, quieted; the default NaN all ones). The exceptions the host
 // raises are ORed into fflags (CSR 0x23: NV 4, DZ 3, OF 2, UF 1, NX 0):
-// underflow is the host's (AArch64: tininess before rounding).
+// underflow is the host's (AArch64: tininess before rounding, and only when
+// inexact) plus an exact subnormal result -- UF is "tiny", exact or not.
 namespace {
 inline uint64_t d2u(double d) { uint64_t u; memcpy(&u, &d, 8); return u; }
 inline double u2d(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
@@ -308,19 +309,18 @@ inline bool nan64(uint64_t x) { return (x & 0x7fffffffffffffffull) > 0x7ff000000
 inline bool snan64(uint64_t x) { return nan64(x) && !(x & 0x0008000000000000ull); }
 inline bool nan32(uint32_t x) { return (x & 0x7fffffffu) > 0x7f800000u; }
 inline bool snan32(uint32_t x) { return nan32(x) && !(x & 0x00400000u); }
-// the NaN result of a two-operand op with a NaN operand
+// the NaN result of a two-operand op with a NaN operand: rs1's, else rs2's,
+// quieted (a signalling one raises NV: the host's invalid)
 inline uint64_t pick_nan64(uint64_t a, uint64_t b) {
-  if (snan64(a)) return a | 0x0008000000000000ull;
-  if (snan64(b)) return b | 0x0008000000000000ull;
-  return nan64(a) ? a : b;
+  return (nan64(a) ? a : b) | 0x0008000000000000ull;
 }
 inline uint32_t pick_nan32(uint32_t a, uint32_t b) {
-  if (snan32(a)) return a | 0x00400000u;
-  if (snan32(b)) return b | 0x00400000u;
-  return nan32(a) ? a : b;
+  return (nan32(a) ? a : b) | 0x00400000u;
 }
-const uint64_t DNAN64 = 0x7ff8000000000000ull;
-const uint32_t DNAN32 = 0x7fc00000u;
+inline bool sub64(uint64_t x) { return ((x >> 52) & 0x7ff) == 0 && (x & 0x000fffffffffffffull); }
+inline bool sub32(uint32_t x) { return ((x >> 23) & 0xff) == 0 && (x & 0x7fffffu); }
+const uint64_t DNAN64 = 0x7fffffffffffffffull;
+const uint32_t DNAN32 = 0x7fffffffu;
 }  // namespace
 
 void Machine::fpop(const uisa_fuop &u) {
@@ -377,6 +377,15 @@ void Machine::fpop(const uisa_fuop &u) {
     case UISA_FCVT_D_S:
       if (nan32((uint32_t)a))
         r = ((uint64_t)(a & 0x80000000u) << 32) | 0x7ff8000000000000ull | ((uint64_t)(a & 0x3fffffu) << 29);
+      break;
+    }
+    // UF: an exact subnormal result is tiny too
+    switch (u.op) {
+    case UISA_FADD_D: case UISA_FSUB_D: case UISA_FMUL_D: case UISA_FDIV_D:
+      if (sub64(r)) fe |= FE_UNDERFLOW;
+      break;
+    case UISA_FMUL_S: case UISA_FDIV_S: case UISA_FCVT_S_D:
+      if (sub32((uint32_t)r)) fe |= FE_UNDERFLOW;
       break;
     }
     csr[0x23] |= ((fe & FE_INVALID) ? 16u : 0u) | ((fe & FE_DIVBYZERO) ? 8u : 0u) | ((fe & FE_OVERFLOW) ? 4u : 0u) |

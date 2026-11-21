@@ -328,15 +328,15 @@ base_ops:
   # binary64 / binary32 with default exception handling, the rounding mode the
   # FPCR's (CSR fpcr bits 5:4, 68k order: 0 nearest, 1 toward zero, 2 toward
   # -inf, 3 toward +inf), denormals in full (gradual underflow, no flush),
-  # tininess detected before rounding, and these NaN rules: a signaling NaN
-  # operand (the first, then the second) is the result, quieted; else the first
-  # quiet NaN operand; an invalid operation on non-NaN operands gives the
-  # default NaN 0x7ff8000000000000 (single 0x7fc00000). A single occupies bits
-  # 31:0 of its register; an op with a single result writes bits 63:32 zero.
-  # Every arithmetic and conversion op ORs the IEEE exceptions it raises into
-  # CSR fflags; the moves and sign ops raise none. (These are the rules of an
-  # AArch64 host's double arithmetic, which q800sim's FPU uses: spec FP section
-  # in doc/intro.md.) No FP op traps.
+  # tininess detected before rounding, underflow (UF) raised for every tiny
+  # result, exact or not, and the 68881's NaN rules: with a NaN operand the
+  # result is rs1's NaN, else rs2's, quieted (a signaling one raises invalid);
+  # an invalid operation on non-NaN operands gives the default NaN, all ones:
+  # 0x7fffffffffffffff (single 0x7fffffff). A single occupies bits 31:0 of its
+  # register; an op with a single result writes bits 63:32 zero. Every
+  # arithmetic and conversion op ORs the IEEE exceptions it raises into CSR
+  # fflags; the moves and sign ops raise none. (q800sim's FPU is SoftFloat-3
+  # under the same rules: spec FP section in doc/intro.md.) No FP op traps.
   - {name: fadd.d, title: "FP Add Double", major: FP, fn: 0, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 + fs2 (binary64)."}
   - {name: fsub.d, title: "FP Subtract Double", major: FP, fn: 1, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 - fs2."}
   - {name: fmul.d, title: "FP Multiply Double", major: FP, fn: 2, fmt: R, asm: [rd, rs1, rs2], fp: [rd, rs1, rs2], unit: fpu, desc: "fd = fs1 * fs2."}

@@ -2,30 +2,31 @@
 // FDBcc / FTRAPcc (F240-F27F), FBcc (F280-F2FF), FSAVE (F300-F33F) and
 // FRESTORE (F340-F37F).
 //
-// Compiled by ucc (compiler/). The semantics are q800sim's (fpu.cc), not a
-// 68881's: the FP registers hold IEEE doubles (f0-f7), every operation runs
-// in double precision on the FP ops under the FPCR's rounding mode, and
-// single precision (the FPCR's, or an FS* form) rounds the double result to
-// single (double rounding). Extended values are converted at the memory
-// boundary (fpd_num.h ext_to_d / d_to_ext). The q800sim quirks matched:
-//   - every arithmetic result (and FMOVECR's constant) goes through
-//     (float)r whatever the precision: the compiler made round_prec's
-//     conversion unconditional, so its overflow / underflow / inexact /
-//     invalid flags always land in the FPSR;
-//   - FADD and FMUL compute src op dst (the compiler commuted them), FSUB,
-//     FDIV, FSGLDIV and FCMP dst op src, FSGLMUL (float)src * (float)dst: it
-//     decides which NaN operand the result is (its sign is the FPSR's N);
-//   - FSSQRT / FDSQRT (0x41 / 0x45) are FINT: q800sim masks an FS* / FD*
-//     opmode with 0x3b;
-//   - FSCALE converts its source with fcvtzs (inexact for a fraction,
-//     invalid out of the int range), then scalbn;
-//   - FINT / FINTRZ raise no inexact (nearbyint / trunc); FGETEXP / FGETMAN
-//     of an infinity is a NaN with no invalid;
-//   - FCMP of two like-signed infinities is +-0 but keeps the subtraction's
-//     invalid flag;
+// Compiled by ucc (compiler/). The semantics are q800sim's (fpu.cc: Berkeley
+// SoftFloat-3 binary64 with the 68881's rules), not a 68881's: the FP
+// registers hold IEEE doubles (f0-f7), every operation runs in double
+// precision on the FP ops under the FPCR's rounding mode, and single
+// precision (the FPCR's, or an FS* form) rounds the double result to single
+// (double rounding). Extended values are converted at the memory boundary
+// (fpd_num.h ext_to_d / d_to_ext). The 68881's rules (MC68881UM 4.5.4, 6.1):
+//   - NaN operands are handled here, before any FP op runs: the result is
+//     the NaN operand, quieted, sign and payload kept (the destination's
+//     when both are NaNs); a signalling one sets SNAN (not OPERR); no
+//     rounding precision is applied to it, no other flag is set;
+//   - an invalid operation gives the default NaN, all ones (the FP ops'
+//     default NaN), with OPERR;
+//   - UNFL for every tiny result, exact or not (the FP ops' UF), AUNFL only
+//     with INEX2;
+//   - FINT / FINTRZ set INEX2; FSCALE chops its source (no flag), an
+//     infinite source is OPERR; FGETEXP / FGETMAN of an infinity is OPERR;
+//   - FSGLMUL / FSGLDIV truncate the operands to single and round the
+//     result to single, the exponent range a double's (fpd_num.h);
+//   - FCMP and FTST set no flag but SNAN, and FCMP never sets I;
+//   - FMOVE to an integer of a NaN writes the top bits of its significand
+//     (OPERR, or SNAN for a signalling one); FMOVE.S / .D / .X out of a
+//     signalling NaN quiets it (SNAN).
 //   - FTRAPcc, FScc etc. as q800sim; enabled exception traps are not taken.
-// A NaN result is written to a register as the canonical NaN 0x7ff8...
-// (q800sim's from_d), after the condition codes took its sign.
+// A register holds a NaN as it is (no canonical NaN).
 //
 // Every load of an extended value is rounded to a double, as q800sim's: FMOVE.X
 // (and an X operand) to nearest (to_d before begin_op), FMOVEM.X with the
@@ -258,7 +259,7 @@ inline u32 ld32(ea_t e, u32 k) {
 }
 
 // ---------------------------------------------------------------------------
-// FMOVECR's constants (q800sim rom_constant): the doubles a host computes
+// FMOVECR's constants (q800sim rom_constant): the nearest doubles
 inline u64 rom_constant(u32 off) {
   switch (off) {
     case 0x00: return 0x400921fb54442d18ull;   // pi
@@ -283,12 +284,12 @@ inline u64 rom_constant(u32 off) {
   return 0;
 }
 
-// q800sim round_prec, with the conversion its compiler made unconditional:
-// (float)r always (its flags count), the result is (double)(float)r for
-// single precision (1), else r. r is in f10; the result is returned.
+// q800sim round_prec: single precision (1) rounds r to single and back (the
+// conversion's flags count); a NaN is left as it is. r is in f10; the result
+// is returned.
 inline u64 round_prec(u32 prec) {
-  __fcvt_s_d(11, 10);
-  if (prec == 1) {
+  if (prec == 1 && !d_isnan(f10_get())) {
+    __fcvt_s_d(11, 10);
     __fcvt_d_s(10, 11);
   }
   return f10_get();
@@ -437,7 +438,7 @@ inline void fmovem_data(u32 op, u32 cmd, u32 e01, u32 e23, u32 pc) {
       if (!(list & (0x80u >> r))) continue;
       u32 se = __ld_32_gd(b) >> 16;
       u64 m = ((u64)__ld_32_gd(b + 4) << 32) | __ld_32_gd(b + 8);
-      ft_put(r, d_canon(ext_to_d_rm(se, m, rmode)));   // (a NaN as from_d stores it)
+      ft_put(r, ext_to_d_rm(se, m, rmode));   // (a NaN keeps its payload, signalling or not)
       b = b + 12;
     }
     mark_used();
@@ -481,10 +482,15 @@ inline void fmove_out(u32 op, u32 cmd, u32 e01, u32 e23, u32 pc) {
   // the value (begin_op .. end_op): the exception byte is this instruction's
   u32 exc = 0;
   u32 w32 = 0;
-  if (fmt == FMT_L) w32 = (u32)d_to_int(v, rmode, (s32)0x80000000u, 0x7fffffff, exc);
-  else if (fmt == FMT_W) w32 = (u32)d_to_int(v, rmode, -32768, 32767, exc) & 0xffff;
-  else if (fmt == FMT_B) w32 = (u32)d_to_int(v, rmode, -128, 127, exc) & 0xff;
-  else if (fmt == FMT_S) {
+  if (fmt == FMT_L) w32 = (u32)d_to_int(v, rmode, (s32)0x80000000u, 0x7fffffff, 32, exc);
+  else if (fmt == FMT_W) w32 = (u32)d_to_int(v, rmode, -32768, 32767, 16, exc) & 0xffff;
+  else if (fmt == FMT_B) w32 = (u32)d_to_int(v, rmode, -128, 127, 8, exc) & 0xff;
+  else if (d_isnan(v)) {
+    // S / D / X: truncated (S: sign and upper payload), quieted
+    if (d_issnan(v)) exc = FPSR_SNAN;
+    v = v | D_QBIT;
+    w32 = ((u32)(v >> 32) & 0x80000000u) | 0x7f800000u | (u32)((v & D_FRAC) >> 29);
+  } else if (fmt == FMT_S) {
     __csrw(CSR_FFLAGS, 0);
     f8_put(v);
     __fcvt_s_d(10, 8);
@@ -537,7 +543,7 @@ inline void fmove_out(u32 op, u32 cmd, u32 e01, u32 e23, u32 pc) {
 // ---------------------------------------------------------------------------
 // FPU-gen: the general instructions
 
-// the opmodes this routine computes (after q800sim's FS* / FD* mask)
+// the opmodes this routine computes (after the FS* / FD* forms' mapping)
 inline u32 implemented(u32 o) {
   switch (o) {
     case 0x00: case 0x01: case 0x03: case 0x04: case 0x18: case 0x1a: case 0x1e: case 0x1f:
@@ -587,7 +593,7 @@ entry void fpd_gen(void) {
     __csrw(CSR_FPSR, accrue(fpsr));
     __csrw(CSR_FPIAR, pc);
     mark_used();
-    fr_put(dn, d_canon(r));
+    fr_put(dn, r);
     __wrg(GPC, pc + 4);
     __gexit();
   }
@@ -596,7 +602,8 @@ entry void fpd_gen(void) {
   if (o & 0x40) {
     if (o & 4) prec = 2;
     else prec = 1;
-    o = o & 0x3b;
+    if (o == 0x41 || o == 0x45) o = 0x04;   // FSSQRT / FDSQRT
+    else o = o & 0x3b;
   }
   if (transcendental(o)) __brk(BRK_FP_UNIMPL);
   if (!implemented(o)) __brk(BRK_FP_FORM);
@@ -656,88 +663,117 @@ entry void fpd_gen(void) {
   // the operation (begin_op .. end_op)
   __csrw(CSR_FFLAGS, 0);
   u32 swfl = 0;                // the flags of the operations done in software
+  u32 xexc = 0;                // exception bits set directly (SNAN, OPERR)
   u32 store = 1;
+  u32 hwfl = 1;                // the FP ops' flags count (not FCMP's)
+  if (o == 0x38 || o == 0x3a) store = 0;
+  u32 dy = (o >= 0x20 && o <= 0x28) || o == 0x38;
+  u64 r = 0;
+  if ((dy && (d_isnan(dst) || d_isnan(src))) || (!dy && d_isnan(src))) {
+    // NaN operands (MC68881UM 4.5.4): no rounding precision, no other flag
+    if (dy && d_isnan(dst)) r = dst;
+    else r = src;
+    if (d_issnan(src) || (dy && d_issnan(dst))) xexc = FPSR_SNAN;
+    r = r | D_QBIT;
+    u32 fpsr = (__csrr(CSR_FPSR) & 0xf00000ffu) | d_fpcc(r) | xexc;
+    if (o == 0x38) fpsr = fpsr & ~0x02000000u;
+    __csrw(CSR_FPSR, accrue(fpsr));
+    __csrw(CSR_FPIAR, pc);
+    mark_used();
+    if (store) fr_put(dn, r);
+    if (e.wb) __wrg(A0 + reg, e.newA);
+    __wrg(GPC, pc + e.len);
+    __gexit();
+  }
   f8_put(src);
   f9_put(dst);
+  u64 sw = 0;                  // a result computed in software
+  u32 is_sw = 1;
   switch (o) {
-    case 0x00: __fmov_d(10, 8); break;                       // FMOVE
-    case 0x01: {                                              // FINT
-      u64 r = d_rint(src, rmode, swfl);
-      __fsethi(10, (u32)(r >> 32));
-      __fsetlo(10, (u32)r);
+    case 0x00: is_sw = 0; __fmov_d(10, 8); break;            // FMOVE
+    case 0x01: sw = d_rint(src, rmode, swfl); break;          // FINT
+    case 0x03: sw = d_rint(src, 1, swfl); break;              // FINTRZ
+    case 0x04: is_sw = 0; __fsqrt_d(10, 8); break;           // FSQRT
+    case 0x18: is_sw = 0; __fabs_d(10, 8); break;            // FABS
+    case 0x1a: is_sw = 0; __fneg_d(10, 8); break;            // FNEG
+    case 0x1e:                                                // FGETEXP
+      if (d_isinf(src)) xexc = FPSR_OPERR;
+      sw = d_getexp(src);
       break;
-    }
-    case 0x03: {                                              // FINTRZ
-      u64 r = d_rint(src, 1, swfl);
-      __fsethi(10, (u32)(r >> 32));
-      __fsetlo(10, (u32)r);
+    case 0x1f:                                                // FGETMAN
+      if (d_isinf(src)) xexc = FPSR_OPERR;
+      sw = d_getman(src);
       break;
-    }
-    case 0x04: __fsqrt_d(10, 8); break;                      // FSQRT
-    case 0x18: __fabs_d(10, 8); break;                       // FABS
-    case 0x1a: __fneg_d(10, 8); break;                       // FNEG
-    case 0x1e: {                                              // FGETEXP
-      u64 r = d_getexp(src);
-      __fsethi(10, (u32)(r >> 32));
-      __fsetlo(10, (u32)r);
-      break;
-    }
-    case 0x1f: {                                              // FGETMAN
-      u64 r = d_getman(src);
-      __fsethi(10, (u32)(r >> 32));
-      __fsetlo(10, (u32)r);
-      break;
-    }
-    case 0x20: __fdiv_d(10, 9, 8); break;                    // FDIV: dst / src
-    case 0x22: __fadd_d(10, 8, 9); break;                    // FADD: src + dst
-    case 0x23: __fmul_d(10, 8, 9); break;                    // FMUL: src * dst
-    case 0x24:                                                // FSGLDIV: (float)dst / (float)src
-      __fcvt_s_d(12, 9);
-      __fcvt_s_d(13, 8);
-      __fdiv_s(14, 12, 13);
-      __fcvt_d_s(10, 14);
-      break;
-    case 0x26: {                                              // FSCALE
-      u64 r = D_QNAN;
-      if (!d_isnan(src) && !d_isinf(src)) {
-        s32 k = d_fcvtzs(src, swfl);
-        r = d_scalbn(dst, k, rmode, swfl);
+    case 0x20: is_sw = 0; __fdiv_d(10, 9, 8); break;         // FDIV: dst / src
+    case 0x22: is_sw = 0; __fadd_d(10, 9, 8); break;         // FADD
+    case 0x23: is_sw = 0; __fmul_d(10, 9, 8); break;         // FMUL
+    case 0x24: case 0x27: {                                   // FSGLDIV, FSGLMUL
+      u64 sg = (dst ^ src) & D_SIGN;
+      u32 zd = d_iszero(dst);
+      u32 zs = d_iszero(src);
+      u32 id = d_isinf(dst);
+      u32 is = d_isinf(src);
+      u32 inv = 0;
+      if (o == 0x24) inv = (zd && zs) || (id && is);
+      else inv = (zd && is) || (id && zs);
+      if (inv) {
+        xexc = FPSR_OPERR;
+        sw = D_DNAN;
+      } else if (o == 0x24 && zs) {
+        swfl = swfl | FL_DZ;
+        sw = sg | D_INF;
+      } else if (id || (o == 0x27 && is)) {
+        sw = sg | D_INF;
+      } else if (zd || zs || is) {
+        sw = sg;
+      } else if (o == 0x24) {
+        sw = d_sgldiv(dst, src, rmode, swfl);
+      } else {
+        sw = d_sglmul(dst, src, rmode, swfl);
       }
-      __fsethi(10, (u32)(r >> 32));
-      __fsetlo(10, (u32)r);
       break;
     }
-    case 0x27:                                                // FSGLMUL: (float)src * (float)dst
-      __fcvt_s_d(12, 9);
-      __fcvt_s_d(13, 8);
-      __fmul_s(14, 13, 12);
-      __fcvt_d_s(10, 14);
+    case 0x26:                                                // FSCALE
+      if (d_isinf(src)) {
+        xexc = FPSR_OPERR;
+        sw = D_DNAN;
+      } else {
+        sw = d_scalbn(dst, d_chop14(src), rmode, swfl);
+      }
       break;
-    case 0x28: __fsub_d(10, 9, 8); break;                    // FSUB: dst - src
-    case 0x38: {                                              // FCMP: dst - src
-      store = 0;
-      __fsub_d(10, 9, 8);
+    case 0x28: is_sw = 0; __fsub_d(10, 9, 8); break;         // FSUB: dst - src
+    case 0x38: {                                              // FCMP: dst - src (its sign and zero only)
+      hwfl = 0;
       if (d_isinf(dst) && d_isinf(src) && ((dst ^ src) & D_SIGN) == 0) {
-        __fsethi(10, (u32)(dst >> 32) & 0x80000000u);
-        __fsetlo(10, 0);
+        sw = dst & D_SIGN;
+      } else {
+        is_sw = 0;
+        __fsub_d(10, 9, 8);
       }
       break;
     }
     default:                                                  // 0x3a FTST
-      store = 0;
+      is_sw = 0;
       __fmov_d(10, 8);
       break;
   }
-  u64 r = round_prec(prec);
-  u32 fl = __csrr(CSR_FFLAGS) | swfl;
+  if (is_sw) {
+    __fsethi(10, (u32)(sw >> 32));
+    __fsetlo(10, (u32)sw);
+  }
+  if (store) r = round_prec(prec);
+  else r = f10_get();
+  u32 fl = swfl;
+  if (hwfl) fl = fl | __csrr(CSR_FFLAGS);
 
   // commit: FPSR (quotient cleared, condition codes, exception and accrued
   // bytes), FPIAR, the register, An
-  u32 fpsr = (__csrr(CSR_FPSR) & 0xf00000ffu) | d_fpcc(r) | exc_of(fl);
+  u32 fpsr = (__csrr(CSR_FPSR) & 0xf00000ffu) | d_fpcc(r) | exc_of(fl) | xexc;
+  if (o == 0x38) fpsr = fpsr & ~0x02000000u;
   __csrw(CSR_FPSR, accrue(fpsr));
   __csrw(CSR_FPIAR, pc);
   mark_used();
-  if (store) fr_put(dn, d_canon(r));
+  if (store) fr_put(dn, r);
   if (e.wb) __wrg(A0 + reg, e.newA);
   __wrg(GPC, pc + e.len);
   __gexit();
@@ -883,7 +919,7 @@ entry void fpd_restore(void) {
     __csrw(CSR_FPCR, 0);
     __csrw(CSR_FPSR, 0);
     __csrw(CSR_FPIAR, 0);
-    for (u32 r = 0; r < 8; r++) fr_put(r, D_QNAN);
+    for (u32 r = 0; r < 8; r++) fr_put(r, D_DNAN);
   } else {
     mark_used();
   }
