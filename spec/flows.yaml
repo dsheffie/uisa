@@ -199,7 +199,15 @@ ops:
   LINK: {any: ["st.32.pre.gd {A}, -4(a7)", "add {A}, a7, x0", "addi a7, a7, {imm}"]}
   UNLK: {any: ["add a7, {A}, x0", "ld.32.gd {A}, 0(a7)", "addi a7, a7, 4"]}
   NOP: {any: ["addi x0, x0, 0"]}
-  EXG: {any: ["add {T}, d1, x0", "add d1, d2, x0", "add d2, {T}, x0"]}
+  # Encodings that raise an exception at decode are one fault uop, raised as
+  # the instruction (format 0, the stacked PC the instruction's). ILLEGAL is
+  # also every opword the decoder rejects (tools/m68kdec.py: undefined
+  # encodings, and defined operations with an addressing mode outside their
+  # category); LINE-F is every line-F opword no coprocessor form claims.
+  ILLEGAL: {any: ["gfault 4"]}
+  LINE-A: {any: ["gfault 10"]}
+  LINE-F: {any: ["gfault 11"]}
+  EXG: {any: ["add {T}, {Rx}, x0", "add {Rx}, {Ry}, x0", "add {Ry}, {T}, x0"]}
   MOVEM:
     sequencer: true
     note: "hardware sequencer: one load or store per register in the mask plus the An update; counted with movem_regs registers"
@@ -246,7 +254,6 @@ millicode:
   - TRAPV
   - STOP
   - RESET
-  - ILLEGAL
   - BKPT
   - CHK
   - CMP2/CHK2
@@ -269,8 +276,6 @@ millicode:
   - BFFFO
   - BFSET
   - BFINS
-  - LINE-A
-  - LINE-F
   - FPU-gen
   - FBcc
   - FScc/FDBcc/FTRAPcc

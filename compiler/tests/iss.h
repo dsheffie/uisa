@@ -7,6 +7,7 @@
 #define UCC_TEST_ISS_H
 
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@ enum { G_D = 32 };
 struct Machine {
   uint32_t R[64] = {}, csr[256] = {};
   bool N = 0, Z = 0, V = 0, C = 0, X = 0;
+  bool U = 0;                         // the millicode predicate u (probe .us/.ua, ld.c/st.c, b.u/b.nu)
   std::vector<uint32_t> cstack;
   uint32_t cur_pc = 0, next_pc = 0;
   int exitv = 0;
@@ -58,12 +60,13 @@ struct Machine {
     const opinfo &o = OPS[d.op];
     uint32_t r = 0, pc = cur_pc, npc = cur_pc + 4;
     uint32_t OLD = R[d.rd];
-    const bool xin = X, nin = N, zin = Z, vin = V, cin = C;
-    (void)OLD; (void)IMM; (void)xin; (void)nin; (void)zin; (void)vin; (void)cin; (void)pc;
+    const bool xin = X, nin = N, zin = Z, vin = V, cin = C, uin = U;
+    (void)OLD; (void)IMM; (void)xin; (void)nin; (void)zin; (void)vin; (void)cin; (void)uin; (void)pc;
 #define GPC_INSN R[48]
 #define GNPC_SET(v) (void)(v)
-#define GREG_READ(i) R[G_D + (i)]
-#define GREG_WRITE(i, v) (R[G_D + (i)] = (v))
+// rdg/wrg reach only the guest registers 0-17; 18-31 is a millicode fault
+#define GREG_READ(i) ((i) > 17 ? (err = "rdg index out of range", 0u) : R[G_D + (i)])
+#define GREG_WRITE(i, v) ((i) > 17 ? (void)(err = "wrg index out of range") : (void)(R[G_D + (i)] = (v)))
 #define CSR_READ(i) csr[(i) & 0xff]
 #define CSR_WRITE(i, v) (csr[(i) & 0xff] = (v))
 #define CSTACK_PUSH(v) cstack_push(v)
@@ -98,6 +101,12 @@ struct Machine {
       next_pc = mpc + 4;
       if (o.is_probe) {
         R[d.rd] = 1;                               // MMUSR with R set: a resident translation
+        if (o.writes_u) {                          // .us: u = ok; .ua: u = u && ok
+          bool ok = PROBE_OK(1, !strncmp(o.mnem, "probe.w", 7), false, true);
+          U = o.reads_u ? (U && ok) : ok;
+        }
+      } else if ((o.is_load || o.is_store) && o.reads_u && !U) {
+        if (o.is_load) R[d.rd] = 0;                // ld.c / st.c with u clear: no access
       } else if (o.is_load) {
         uint32_t v = d.sp == 0 ? hload(a + d.imm, o.mem_bytes) : load(a + d.imm, o.mem_bytes);
         if (o.load_signed) v = (uint32_t)SX(v, 8 * o.mem_bytes);

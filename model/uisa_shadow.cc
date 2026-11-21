@@ -77,7 +77,11 @@ struct LogMem : Mem {
   std::map<uint32_t, uint8_t> writes;
   uint32_t oracle_mmusr = 0;
   bool ifetch(uint32_t addr, int n, uint32_t &v) override { return lookup(UISA_LOG_IFETCH, addr, n, v); }
-  bool load(int, uint32_t addr, int n, uint32_t &v) override { return lookup(UISA_LOG_READ, addr, n, v); }
+  // a program-space load (millicode's get_ext past the entry registers)
+  // reads extension words, which the host logs as instruction fetches
+  bool load(int fc, uint32_t addr, int n, uint32_t &v) override {
+    return lookup(UISA_LOG_READ, addr, n, v) || ((fc & 3) == 2 && lookup(UISA_LOG_IFETCH, addr, n, v));
+  }
   void store(int, uint32_t addr, int n, uint32_t v) override {
     for (int i = 0; i < n; i++) writes[addr + i] = (uint8_t)(v >> (8 * (n - 1 - i)));
   }
@@ -163,6 +167,8 @@ void uisa_shadow_post(const uisa_m68k_state *post) {
   } else gap_run++;
   if (log_overflow) return;
   if (kind == K_MILLICODE && f.mc_entry < 0) { stats[cur_op].result[R_NATIVE]++; return; }
+  // the FPU routines need the host's FP state (uisa_m68k_state fp_valid)
+  if ((cur_op & 0xfe00) == 0xf200 && pre.fp_valid != UISA_FP_VALID) { stats[cur_op].result[R_NATIVE]++; return; }
   if (kind != K_PLA && kind != K_SEQUENCER && kind != K_MILLICODE) return;
 
   Machine m;

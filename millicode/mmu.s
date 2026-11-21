@@ -1,7 +1,8 @@
 ; Millicode for TAS, CAS, CAS2 and the 68040 cache and MMU instructions.
 
 ; ---------------------------------------------------------------------------
-; TAS <ea>: test a byte, then set its bit 7 (locked read-modify-write)
+; TAS <ea>: test a byte, then set its bit 7 (locked read-modify-write). The
+; unlocking store, which can fault, comes before the flags change.
 ; ---------------------------------------------------------------------------
 tas:
         srli    x5, x1, 3
@@ -19,9 +20,9 @@ tas_mem:
         addi    x22, x0, 2
         call    ea_addr
         ldl.8.gd x11, 0(x23)
-        mov.8z  x0, x11
-        ori     x11, x11, 0x80
-        stu.8.gd x11, 0(x23)
+        ori     x12, x11, 0x80
+        stu.8.gd x12, 0(x23)            ; the store first: it can fault (faults before commits)
+        mov.8z  x0, x11                 ; then N Z from the old byte, V = C = 0
         call    commit_an
         jal     x0, exit
 

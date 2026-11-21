@@ -17,11 +17,27 @@ $(GEN): spec/uisa.yaml doc/intro.md tools/gen.py tools/uisa.py
 
 gen: $(GEN)
 
+# the guest-op semantics (spec guest_ops `sem`) as SystemVerilog, for an RTL
+# implementation (superdupersparc's `make uisa-gen` copies it)
+build/uisa_gop.sv: spec/uisa.yaml tools/gen_sv.py tools/gen_smt.py tools/uisa.py
+	python3 tools/gen_sv.py
+
+gen-sv: build/uisa_gop.sv
+
+.PHONY: gen-sv
+
 # PLA flow coverage against a recorded NeXTSTEP histogram
 doc/flows.md: spec/flows.yaml spec/uisa.yaml tools/flows.py tools/m68kdec.py data/ns22_boot_desktop.hist
 	python3 tools/flows.py report data/ns22_boot_desktop.hist --top 45 -o $@
 
 flows: doc/flows.md
+
+# the PDF reference manual (needs pdflatex with tikz, listings, enumitem,
+# fancyhdr, titlesec, changepage, longtable and hyperref); not part of `test`
+doc/uisa.pdf: spec/uisa.yaml spec/flows.yaml doc/intro.md tools/gen_pdf.py tools/uisa.py tools/flows.py tools/m68kdec.py
+	python3 tools/gen_pdf.py
+
+pdf: doc/uisa.pdf
 
 # the millicode C compiler (compiler/, CMake; needs flex, bison and z3)
 compiler:
@@ -38,10 +54,16 @@ test: $(GEN) compiler
 	python3 compiler/prog/test_prog.py 100
 	python3 tests/softfloat/test_fx80.py 20000
 	python3 tests/fpu/test_fpu.py 20000
+	c++ -std=c++17 -O0 -frounding-math -Imillicode -o build/test_fpd_num tests/fpd/test_num.cc
+	./build/test_fpd_num 100000
 	python3 tools/gen_model.py >/dev/null
 	python3 tools/gen_millicode.py >/dev/null
+	python3 tools/check_millicode.py -q
+	python3 tests/test_check_millicode.py
 	c++ -std=c++17 -O1 -Ibuild -Imodel -o build/test_shadow tests/test_shadow.cc model/uisa_shadow.cc model/uisa_machine.cc
 	./build/test_shadow
+	c++ -std=c++17 -O1 -Ibuild -Imodel -o build/test_engine tests/test_engine.cc model/uisa_engine.cc model/uisa_machine.cc
+	./build/test_engine
 	verilator --binary -Wall -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM --top-module tb_decode \
 		--Mdir $(VMDIR) build/uisa_pkg.sv tests/tb_decode.sv -o tb_decode >/dev/null
 	$(VMDIR)/tb_decode
@@ -53,4 +75,4 @@ release:
 clean:
 	rm -rf build $(VMDIR)
 
-.PHONY: all gen flows compiler test release clean
+.PHONY: all gen flows pdf compiler test release clean

@@ -43,7 +43,8 @@ struct EngineHost {
   virtual void mmu_flush() = 0;
 };
 
-struct EngineStore { uint8_t fc, size; uint32_t addr, value; };
+// seq: the millicode uop that made the store (0 in PLA and sequencer flows)
+struct EngineStore { uint8_t fc, size; uint32_t addr, value; uint32_t seq; };
 
 enum { E_DONE, E_FAULT, E_FALLBACK };
 
@@ -56,6 +57,19 @@ struct EngineResult {
   bool raised = false;              // the instruction took an exception
   uint32_t vector = 0;
   uint32_t uops = 0;                // PLA/sequencer uops or millicode words run
+  uint32_t ilen = 0;                // instruction length in bytes, extension words included
+  bool full_ext = false;            // a full-format index extension word lengthened it
+  // Point of no return (millicode): pnr_seq is the uop that made the first
+  // guest-visible write (0: none), at millicode address pnr_mpc. A load that
+  // faulted after it sets pnr_violation (pnr_fault_mpc). A host that finds
+  // a buffered store unwritable checks it with store_after_pnr().
+  // A conditional access (ld.c, st.c, stu.c) with u clear makes no access:
+  // it is not a load that can fault, not a buffered store, and (a store) not
+  // a guest-visible write; with u set it counts as the plain access.
+  uint32_t pnr_seq = 0, pnr_mpc = 0;
+  bool pnr_violation = false;
+  uint32_t pnr_fault_mpc = 0;
+  bool store_after_pnr(const EngineStore &s) const { return pnr_seq && s.seq > pnr_seq; }
 };
 
 // Run the instruction at s.pc whose opword is `op`.

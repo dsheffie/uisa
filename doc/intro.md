@@ -66,6 +66,12 @@ Every guest op has a variant (`.nf`) that writes no flags. Most 68k flag
 results are overwritten before anything reads them, so the PLA and the
 compiler emit `.nf` whenever the flags are dead.
 
+A third renamed 1-bit resource, `u`, is a millicode-private predicate. It is
+never guest-visible: it is not in the CCR layout (`rdccr`/`wrccr` do not touch
+it) and is not saved or restored, since millicode is not interruptible and `u`
+is dead at the end of a routine. Probes write it and conditional loads and
+stores read it (see below).
+
 ## Sized operations
 
 A renamed machine always allocates a new physical register for the
@@ -116,6 +122,26 @@ get no writeback form: a post-increment load would need two results.
 of faulting. They build PTEST and let millicode check every address it will
 touch before it changes any guest state.
 
+For accesses with side effects (uncached device registers), checking is not
+enough: the accesses themselves must not issue until every probe has
+succeeded, and a branch on the probe results would be predicted around. So
+the ordering is a data dependence instead, as in speculative-load hardening.
+`probe.r.us`/`probe.w.us` also set the predicate `u` to "the probed access
+would succeed"; the `.ua` forms AND their result into `u`. The conditional
+loads and stores `ld.c.*`, `st.c.*` and `stu.c.*` read `u`: with `u` set they
+are exactly the plain access; with `u` clear they make no access at all (no
+translation, no fault), a load returns 0 and a store writes nothing (`stu.c`
+still ends the locked sequence). `b.u`/`b.nu` branch on `u`, to the fault
+path once the accesses are done:
+
+```
+probe.r.us.gd  x5, 0(a0)     ; x5 = MMUSR; u = the read would succeed
+probe.r.ua.gd  x6, 0(a1)     ; u &= ok
+ld.c.32.gd     x11, 0(a0)    ; if u: load; else x11 = 0, no access
+st.c.32.gd     x13, 0(a2)    ; if u: store; else nothing
+b.nu           fault
+```
+
 ## Millicode rules
 
 1. **Stackless.** No memory stack and no spilling. Calls use a hardware return
@@ -145,15 +171,56 @@ instruction, checks interrupts and trace, and resumes the guest stream.
 exception entry point, which is itself millicode and builds the 68k stack
 frame.
 
+## Floating point
+
+The FP extension (major 48, `FP`) gives the core's double-precision FPU to
+millicode. FP registers are a namespace of their own: `f0`-`f7` hold the
+guest's FP0-FP7 as IEEE doubles, `f8`-`f15` are millicode temporaries. An FP
+op names them in the same 6-bit register fields; the spec lists which fields
+of an op are FP (`fp: [rd, rs1, rs2]`), and the decoder carries that as
+`fpregs`. The ops:
+
+- `fadd.d fsub.d fmul.d fdiv.d fsqrt.d`, `fmul.s fdiv.s` (singles in bits
+  31:0), `fcvt.s.d fcvt.d.s`: IEEE 754 under the FPCR's rounding mode (CSR
+  `fpcr` bits 5:4, the 68k's order), denormals in full, tininess before
+  rounding, and AArch64's NaN rules (a signaling operand first, then the
+  first quiet one; the default NaN 0x7ff8000000000000). Each ORs the IEEE
+  exceptions it raises into CSR `fflags` (NV DZ OF UF NX); a read of `fflags`
+  sees every older FP op's.
+- `fmov.d fneg.d fabs.d`: bit copies, no exceptions.
+- `fsethi fsetlo` (an x register into half of an FP register, the other half
+  kept) and `fgethi fgetlo` (half of an FP register into an x register): the
+  only paths between the files. Memory never holds FP registers directly:
+  millicode loads and stores them as integers, so misaligned, uncached and
+  faulting operands take the integer paths' mechanisms.
+
+These are the semantics of q800sim's FPU (host doubles on AArch64), which is
+the reference: the 68881's 80-bit values exist only in memory, converted by
+millicode at FMOVE.X / FMOVEM.X (`millicode/fpd_num.h`, q800sim's `to_d` /
+`from_d` exactly). `millicode/fpd.c` implements FPU-gen, FScc / FDBcc /
+FTRAPcc, FBcc, FSAVE and FRESTORE on them, q800sim's quirks included (see
+its header). The transcendentals, FMOD / FREM and packed decimal are not
+there yet (`brk 30` / `brk 31`). Extended precision is double everywhere:
+every load of an extended value is rounded to a double (FMOVE.X to nearest,
+FMOVEM.X with the FPCR's rounding mode, as q800sim). CSRs `fpcr fpsr fpiar` are the 68881's registers; `fpused` is the
+FSAVE frame state (null until the FPU is used).
+
+The model (`model/uisa_machine.cc` `fpop`) computes the FP ops with the
+host's arithmetic and fenv, the NaN rules applied explicitly; its flags (the
+underflow's tininess rule in particular) are an AArch64 host's.
+`uisa_m68k_state` carries the FPU when `fp_valid` says so; without it the
+engine and the shadow leave coprocessor-1 instructions to the host.
+
 ## Open questions
 
 - Hidden memory base and size, and whether hot handlers live in on-chip RAM.
 - Whether the 68040 table walk is hardware (from the rv64core/superdupersparc
   walker) or a millicode TLB refill using `probe` and a TLB-write operation
   not yet defined here.
-- The FP extension (majors 48-55 are reserved). Start with SoftFloat-style
-  extended precision in millicode; add hardware double precision if NeXTSTEP
-  profiles need it.
+- The FP extension's next step (majors 49-52 stay reserved): the
+  transcendentals and FMOD / FREM in millicode, with q800sim calling the same
+  C code. Extended precision stays double (decided 2026-11-20: no floatx80
+  soft-float). The double-precision ops are in (*Floating point*).
 - Exact N and V results of the BCD ops, which the 68040 leaves undefined;
   match the reference model (Previous) once co-simulation runs.
 - Whether 16-bit displacements in the PLA's uops need a matching millicode
@@ -163,8 +230,10 @@ frame.
 
 ```
 make            # validate the spec, regenerate build/ and doc/uisa.md, run the tests
+make pdf        # the reference manual, doc/uisa.pdf (needs pdflatex)
 ```
 
 Edit `spec/uisa.yaml` (the ISA) or `doc/intro.md` (the rationale); never edit
-`build/` or `doc/uisa.md`. The generated doc is committed so it can be read on
-GitHub; commit it together with the spec change that produced it.
+`build/`, `doc/uisa.md` or `doc/uisa.pdf`. The generated docs are committed so
+they can be read on GitHub; commit them together with the spec change that
+produced them. Each spec entry's `title` names its page in the manual.

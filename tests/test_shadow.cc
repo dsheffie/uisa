@@ -1168,6 +1168,24 @@ int main() {
     t.post.r[8] = 0x5000; t.post.r[1] = 42;
     run(t);
   }
+  // Millicode extension words past the four delivered in x2/x3 at entry:
+  // get_ext loads them from program space (offsets 10 and up).
+  {  // TAS ([$10.L,A1],$24.L): long bd and od; 12 bytes (od's low word at offset 10)
+    Insn t{"tas ([bd.l,a1],od.l)", 0x4af1, st(0x2900, 0x2700), st(0x290c, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0x2902, 0x0173}, {UISA_LOG_IFETCH, 4, 0x2904, 0x00000010}, {UISA_LOG_IFETCH, 4, 0x2908, 0x00000024},
+            {UISA_LOG_READ, 4, 0x5010, 0x6000}, {UISA_LOG_READ, 1, 0x6024, 0x05}, {UISA_LOG_WRITE, 1, 0x6024, 0x85}}, 0};
+    t.pre.r[9] = 0x5000; t.post.r[9] = 0x5000;
+    run(t);
+  }
+  {  // MOVES.L ([$10.L,A1],$24.L),D0, 14 bytes (od at 10-13): the PLA (XSEL) flow's full-format
+     // index expansion, not get_ext -- a long instruction on the PLA path, for contrast
+    Insn t{"moves.l ([bd.l,a1],od.l),d0", 0x0eb1, st(0x2a00, 0x2700), st(0x2a0e, 0x2700),
+           {{UISA_LOG_IFETCH, 2, 0x2a02, 0x0000}, {UISA_LOG_IFETCH, 2, 0x2a04, 0x0173}, {UISA_LOG_IFETCH, 4, 0x2a06, 0x00000010},
+            {UISA_LOG_IFETCH, 4, 0x2a0a, 0x00000024}, {UISA_LOG_READ, 4, 0x5010, 0x6000}, {UISA_LOG_READ, 4, 0x6024, 0x13572468}}, 0};
+    t.pre.r[9] = 0x5000; t.pre.ctl[UISA_CTL_SFC] = 1; t.pre.ctl[UISA_CTL_DFC] = 1;
+    t.post.r[9] = 0x5000; t.post.r[0] = 0x13572468; t.post.ctl[UISA_CTL_SFC] = 1; t.post.ctl[UISA_CTL_DFC] = 1;
+    run(t);
+  }
   fails += random_divl(20000);
   fails += random_divw(20000);
   fails += random_bfwrite(20000);

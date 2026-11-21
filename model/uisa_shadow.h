@@ -30,7 +30,17 @@ struct uisa_m68k_state {
 	uint32_t pc;
 	uint16_t sr;
 	uint32_t ctl[UISA_CTL_NUM];  /* the inactive stack pointers are valid; the active one is A7 */
+	/* The FPU (spec FP section), valid only when fp_valid == UISA_FP_VALID:
+	 * FP0-FP7 as IEEE doubles (the uisa FP registers f0-f7; a host whose FP
+	 * registers are 80-bit converts them), FPCR, FPSR, FPIAR and fpused (1:
+	 * the FPU has been used since its reset, FSAVE makes an idle frame).
+	 * Without it, the model leaves coprocessor-1 instructions (opwords
+	 * F200-F3FF) to the host. */
+	uint32_t fp_valid;
+	uint64_t fp[8];
+	uint32_t fpcr, fpsr, fpiar, fpused;
 };
+#define UISA_FP_VALID 0x46505531u   /* "FPU1" */
 
 enum { UISA_LOG_READ = 0, UISA_LOG_WRITE = 1, UISA_LOG_IFETCH = 2 };
 

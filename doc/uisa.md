@@ -66,6 +66,12 @@ Every guest op has a variant (`.nf`) that writes no flags. Most 68k flag
 results are overwritten before anything reads them, so the PLA and the
 compiler emit `.nf` whenever the flags are dead.
 
+A third renamed 1-bit resource, `u`, is a millicode-private predicate. It is
+never guest-visible: it is not in the CCR layout (`rdccr`/`wrccr` do not touch
+it) and is not saved or restored, since millicode is not interruptible and `u`
+is dead at the end of a routine. Probes write it and conditional loads and
+stores read it (see below).
+
 ## Sized operations
 
 A renamed machine always allocates a new physical register for the
@@ -116,6 +122,26 @@ get no writeback form: a post-increment load would need two results.
 of faulting. They build PTEST and let millicode check every address it will
 touch before it changes any guest state.
 
+For accesses with side effects (uncached device registers), checking is not
+enough: the accesses themselves must not issue until every probe has
+succeeded, and a branch on the probe results would be predicted around. So
+the ordering is a data dependence instead, as in speculative-load hardening.
+`probe.r.us`/`probe.w.us` also set the predicate `u` to "the probed access
+would succeed"; the `.ua` forms AND their result into `u`. The conditional
+loads and stores `ld.c.*`, `st.c.*` and `stu.c.*` read `u`: with `u` set they
+are exactly the plain access; with `u` clear they make no access at all (no
+translation, no fault), a load returns 0 and a store writes nothing (`stu.c`
+still ends the locked sequence). `b.u`/`b.nu` branch on `u`, to the fault
+path once the accesses are done:
+
+```
+probe.r.us.gd  x5, 0(a0)     ; x5 = MMUSR; u = the read would succeed
+probe.r.ua.gd  x6, 0(a1)     ; u &= ok
+ld.c.32.gd     x11, 0(a0)    ; if u: load; else x11 = 0, no access
+st.c.32.gd     x13, 0(a2)    ; if u: store; else nothing
+b.nu           fault
+```
+
 ## Millicode rules
 
 1. **Stackless.** No memory stack and no spilling. Calls use a hardware return
@@ -145,15 +171,56 @@ instruction, checks interrupts and trace, and resumes the guest stream.
 exception entry point, which is itself millicode and builds the 68k stack
 frame.
 
+## Floating point
+
+The FP extension (major 48, `FP`) gives the core's double-precision FPU to
+millicode. FP registers are a namespace of their own: `f0`-`f7` hold the
+guest's FP0-FP7 as IEEE doubles, `f8`-`f15` are millicode temporaries. An FP
+op names them in the same 6-bit register fields; the spec lists which fields
+of an op are FP (`fp: [rd, rs1, rs2]`), and the decoder carries that as
+`fpregs`. The ops:
+
+- `fadd.d fsub.d fmul.d fdiv.d fsqrt.d`, `fmul.s fdiv.s` (singles in bits
+  31:0), `fcvt.s.d fcvt.d.s`: IEEE 754 under the FPCR's rounding mode (CSR
+  `fpcr` bits 5:4, the 68k's order), denormals in full, tininess before
+  rounding, and AArch64's NaN rules (a signaling operand first, then the
+  first quiet one; the default NaN 0x7ff8000000000000). Each ORs the IEEE
+  exceptions it raises into CSR `fflags` (NV DZ OF UF NX); a read of `fflags`
+  sees every older FP op's.
+- `fmov.d fneg.d fabs.d`: bit copies, no exceptions.
+- `fsethi fsetlo` (an x register into half of an FP register, the other half
+  kept) and `fgethi fgetlo` (half of an FP register into an x register): the
+  only paths between the files. Memory never holds FP registers directly:
+  millicode loads and stores them as integers, so misaligned, uncached and
+  faulting operands take the integer paths' mechanisms.
+
+These are the semantics of q800sim's FPU (host doubles on AArch64), which is
+the reference: the 68881's 80-bit values exist only in memory, converted by
+millicode at FMOVE.X / FMOVEM.X (`millicode/fpd_num.h`, q800sim's `to_d` /
+`from_d` exactly). `millicode/fpd.c` implements FPU-gen, FScc / FDBcc /
+FTRAPcc, FBcc, FSAVE and FRESTORE on them, q800sim's quirks included (see
+its header). The transcendentals, FMOD / FREM and packed decimal are not
+there yet (`brk 30` / `brk 31`). Extended precision is double everywhere:
+every load of an extended value is rounded to a double (FMOVE.X to nearest,
+FMOVEM.X with the FPCR's rounding mode, as q800sim). CSRs `fpcr fpsr fpiar` are the 68881's registers; `fpused` is the
+FSAVE frame state (null until the FPU is used).
+
+The model (`model/uisa_machine.cc` `fpop`) computes the FP ops with the
+host's arithmetic and fenv, the NaN rules applied explicitly; its flags (the
+underflow's tininess rule in particular) are an AArch64 host's.
+`uisa_m68k_state` carries the FPU when `fp_valid` says so; without it the
+engine and the shadow leave coprocessor-1 instructions to the host.
+
 ## Open questions
 
 - Hidden memory base and size, and whether hot handlers live in on-chip RAM.
 - Whether the 68040 table walk is hardware (from the rv64core/superdupersparc
   walker) or a millicode TLB refill using `probe` and a TLB-write operation
   not yet defined here.
-- The FP extension (majors 48-55 are reserved). Start with SoftFloat-style
-  extended precision in millicode; add hardware double precision if NeXTSTEP
-  profiles need it.
+- The FP extension's next step (majors 49-52 stay reserved): the
+  transcendentals and FMOD / FREM in millicode, with q800sim calling the same
+  C code. Extended precision stays double (decided 2026-11-20: no floatx80
+  soft-float). The double-precision ops are in (*Floating point*).
 - Exact N and V results of the BCD ops, which the 68040 leaves undefined;
   match the reference model (Previous) once co-simulation runs.
 - Whether 16-bit displacements in the PLA's uops need a matching millicode
@@ -163,17 +230,19 @@ frame.
 
 ```
 make            # validate the spec, regenerate build/ and doc/uisa.md, run the tests
+make pdf        # the reference manual, doc/uisa.pdf (needs pdflatex)
 ```
 
 Edit `spec/uisa.yaml` (the ISA) or `doc/intro.md` (the rationale); never edit
-`build/` or `doc/uisa.md`. The generated doc is committed so it can be read on
-GitHub; commit it together with the spec change that produced it.
+`build/`, `doc/uisa.md` or `doc/uisa.pdf`. The generated docs are committed so
+they can be read on GitHub; commit them together with the spec change that
+produced them. Each spec entry's `title` names its page in the manual.
 
 <!-- Everything below is generated from spec/uisa.yaml by tools/gen.py. -->
 
 # Reference (generated)
 
-Spec version **0.1-draft**. 671 concrete instruction variants.
+Spec version **0.1-draft**. 749 concrete instruction variants.
 
 ## Parameters
 
@@ -199,10 +268,18 @@ Register specifiers are 6 bits. Indices not listed are reserved.
 | 48 | `gpc` | Guest PC. Holds the current instruction's address on millicode entry; millicode writes the next PC before gexit. |
 | 49 | `gsr` | Guest SR system byte (T1 T0 S M - I2 I1 I0) in bits 15:8. The CCR byte lives in the renamed flags, not here. |
 
+FP registers are a namespace of their own, 64 bits each, named only by the register fields an FP op lists as FP (the Operands column marks them `f:`):
+
+| Index | Names | Description |
+|---|---|---|
+| 0-7 | `f0`-`f7` | The guest's FP0-FP7, held as IEEE doubles (the 68881's 80-bit values are converted at the memory boundary: FMOVE.X, FMOVEM.X). |
+| 8-15 | `f8`-`f15` | Millicode FP temporaries f8-f15. Not preserved across gexit. |
+
 ## Flags
 
-Two renamed flag resources: `nzvc` (N Z V C), `x` (X).
+3 renamed flag resources: `nzvc` (N Z V C), `x` (X), `u` (U).
 `rdccr`/`wrccr` use the 68k CCR layout: X=bit 4, N=bit 3, Z=bit 2, V=bit 1, C=bit 0.
+`u`: the millicode-private predicate, never guest-visible and not in the CCR layout (`rdccr`/`wrccr` do not touch it). Probes `.us`/`.ua` write it (the probed access would succeed: `(!tce && mmusr == 0) || (((mmusr & 3) != 0) && !((mmusr >> 11) & 1) && !(w && ((mmusr >> 2) & 1)) && !(user && ((mmusr >> 7) & 1)))`, from the MMUSR result `mmusr`, `w` for a write probe, `user` for a user-mode access and `tce` for TC.E: with translation off and no TTR match the MMUSR is 0 and the access succeeds); `ld.c`, `st.c`, `stu.c`, `b.u` and `b.nu` read it.
 
 ## Formats
 
@@ -218,6 +295,9 @@ Two renamed flag resources: `nzvc` (N Z V C), `x` (X).
 | G | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `fn[7:2]` `sz[1:0]` |  |
 | GI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `sz[7:6]` `imm[5:0]` | unsigned |
 | M | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `imm[11:0]` | signed |
+| MP | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `um[11:10]` `imm[9:0]` | signed |
+| MCL | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `lk[11:9]` `imm[8:0]` | signed |
+| MCS | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `sz[11:10]` `ul[9:9]` `imm[8:0]` | signed |
 | MW | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `imm[5:0]` | signed |
 | MC | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `sz[5:4]` `imm[3:0]` | signed |
 | S | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `imm[7:0]` | unsigned |
@@ -237,7 +317,7 @@ Base ops can override immediate signedness (e.g. logical immediates are zero-ext
 | **24** | LD16U | LD16S | LD32 | ST8 | ST16 | ST32 | LDL8 | LDL16 |
 | **32** | LDL32 | STU8 | STU16 | STU32 | PROBER | PROBEW | SYS | BF |
 | **40** | BFI | GBCC | GBZ | GPCADDI | GOPN | GOPZN | GOPIN | GOPIZN |
-| **48** | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | *FP* | CAS |
+| **48** | FP | *FP* | *FP* | *FP* | *FP* | STC | LDC | CAS |
 | **56** | GJR | GPUSHR | STPRE8 | STPRE16 | STPRE32 | STPOST8 | STPOST16 | STPOST32 |
 
 ## Base operations
@@ -285,8 +365,8 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `mrg16` | R | ALU fn=36 | rd, rs1, rs2 | `r = (a & ~0xffffu) \| (b & 0xffffu);` |  |
 | `rdccr` | R | ALU fn=37 | rd | `r = CCR_PACK(xin, nin, zin, vin, cin);` | Copy the renamed flags into a register (CCR layout). (reads nzvc+x) |
 | `wrccr` | R | ALU fn=38 | rs1 | `CCR_UNPACK(a, X, N, Z, V, C);` | Load the renamed flags from a register (CCR layout). (writes nzvc+x) |
-| `rdg` | R | ALU fn=39 | rd, rs1 | `r = GREG_READ(a & 31);` | Read guest register g[rs1 & 31] (namespace index 32 + n). Index is data, so rename serializes. (serializes) |
-| `wrg` | R | ALU fn=40 | rs1, rs2 | `GREG_WRITE(a & 31, b);` | Write rs2 to guest register g[rs1 & 31]. Serializes. (serializes) |
+| `rdg` | R | ALU fn=39 | rd, rs1 | `r = GREG_READ(a & 31);` | Read guest register g[rs1 & 31] (namespace index 32 + n): D0-D7, A0-A7, gpc, gsr are 0-17. An index of 18-31 is a millicode fault (registers 50-63 are not reachable). Index is data, so rename serializes. (serializes) |
+| `wrg` | R | ALU fn=40 | rs1, rs2 | `GREG_WRITE(a & 31, b);` | Write rs2 to guest register g[rs1 & 31], 0-17 as rdg; an index of 18-31 is a millicode fault and writes nothing. Serializes. (serializes) |
 | `sh1add` | R | ALU fn=42 | rd, rs1, rs2 | `r = a + (b << 1);` | Scaled-index add (68k (d8,An,Xn*2)). |
 | `sh2add` | R | ALU fn=43 | rd, rs1, rs2 | `r = a + (b << 2);` |  |
 | `sh3add` | R | ALU fn=44 | rd, rs1, rs2 | `r = a + (b << 3);` |  |
@@ -309,6 +389,8 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `jalr` | I | JALR | rd, rs1, imm | `r = pc + 4; npc = (a + b) & ~3u;` |  |
 | `call` | L | CALL | imm | `CSTACK_PUSH(pc + 4); npc = pc + b;` | Push the return address on the hardware millicode return stack. Overflow is a millicode fault. |
 | `b.<cc>` | B | BR cond=cc | rs1, rs2, imm | `if (COND) npc = pc + IMM;` | Compare two registers and branch. Millicode control flow; never reads guest flags. cc: eq ne lt ge ltu geu. |
+| `b.u` | B | BR cond=6 | imm | `if (uin) npc = pc + IMM;` | Branch if the millicode predicate u is set. Encoded in the BR major with cond 6; the rs1 and rs2 fields are zero (the assembler writes zeros; the decoder ignores them). The register compare branches never read u. (reads u) |
+| `b.nu` | B | BR cond=7 | imm | `if (!uin) npc = pc + IMM;` | Branch if the millicode predicate u is clear (a probe failed): BR with cond 7, rs1 = rs2 = 0 as b.u. (reads u) |
 | `bcc.<cc>` | C | BCC cond=cc | imm | `if (COND) npc = pc + b;` | Branch on a guest condition. cc: t f hi ls cc cs ne eq vc vs pl mi ge lt gt le. (reads nzvc) |
 | `bfextu` | R | BF fn=0 | rd, rs1, rs2 | `r = BF_EXTU(a, b);` | Extract the field described by rs2 (offset 4:0, width 9:5), zero-extended. |
 | `bfexts` | R | BF fn=1 | rd, rs1, rs2 | `r = BF_EXTS(a, b);` |  |
@@ -316,13 +398,13 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `bfextui` | BFI | BFI fn=0 | rd, rs1, off, wid | `r = BF_EXTU(a, b);` |  |
 | `bfextsi` | BFI | BFI fn=1 | rd, rs1, off, wid | `r = BF_EXTS(a, b);` |  |
 | `bfinsi` | BFI | BFI fn=2 | rd, rs1, off, wid | `r = BF_INS(OLD, a, b);` | Insert the low wid bits of rs1 into the field of rd. rd is also a source (old value), so the op reads rd and rs1. |
-| `bx` | BFI | BFI fn=3 | rs1, off, wid | `npc = pc + 4 + (((a >> BF_OFF(b)) & ((1u << BF_WID(b)) - 1u)) << 2);` | Indexed branch (n-way dispatch): take the wid-bit field of rs1 starting at bit off (counted from the LSB here, 1 <= wid <= 15) as an index into a table of one-instruction slots that follows the bx, usually jal to each case. Predicted like an indirect jump. |
+| `bx` | BFI | BFI fn=3 | rs1, off, wid | `npc = pc + 4 + (((a >> BF_OFF(b)) & MSK(BF_WID(b))) << 2);` | Indexed branch (n-way dispatch): take the wid-bit field of rs1 starting at bit off (counted from the LSB here, 1 <= wid <= 15) as an index into a table of one-instruction slots that follows the bx, usually jal to each case. Predicted like an indirect jump. |
 | `gexit` | S | SYS fn=0 |  |  | End of the guest instruction: retire it, take pending interrupts/trace, resume the guest stream at gpc. |
 | `gfault` | S | SYS fn=1 | imm |  | Raise guest exception vector imm8. Transfers to the exception entry point. |
 | `gfaultr` | S | SYS fn=16 | rs1 |  | Raise the guest exception whose vector is in rs1 (TRAP #n, computed vectors). |
 | `gbcc.<cc>` | CG | GBCC cond=cc | imm | `if (COND) GNPC_SET(GPC_INSN + b);` | Guest conditional branch (Bcc, BRA via gbcc.t). cc: t f hi ls cc cs ne eq vc vs pl mi ge lt gt le. (reads nzvc) |
-| `gbz` | BG | GBZ | rs1, imm | `if (a == 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is zero. |
-| `gbnz` | BG | GBZ | rs1, imm | `if (a != 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is nonzero (DBF). |
+| `gbz` | BG | GBZ cond=0 | rs1, imm | `if (a == 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is zero. |
+| `gbnz` | BG | GBZ cond=1 | rs1, imm | `if (a != 0) GNPC_SET(GPC_INSN + b);` | Guest branch if rs1 is nonzero (DBF). |
 | `gjr` | I | GJR | rs1, imm | `GNPC_SET(a + b);` | Guest jump to rs1 + imm (JMP, JSR, RTS). gjr x0, abs jumps to an absolute address. |
 | `gpushr` | I | GPUSHR | rd, imm | `GSTORE(GDATA, a - 4, 4, GPC_INSN + b); r = a - 4;` | Push a return address: mem[rd - 4] = guest instruction address + imm (its length); rd = rd - 4. One register source and one result (rd is tied to rs1); the data is an immediate. A speculative store whose register result is ready at address generation. |
 | `gpcaddi` | I | GPCADDI | rd, imm | `r = GPC_INSN + b;` | rd = guest instruction address + imm (return addresses, PC-relative operands). |
@@ -340,6 +422,22 @@ No flags, full 32-bit results, unless the row says otherwise. Operand names: `a`
 | `stop` | S | SYS fn=13 |  |  | Wait for an interrupt (68k STOP, after millicode has loaded SR). (serializes) |
 | `halt` | S | SYS fn=14 | imm |  | Stop the machine (simulation / debug). imm is a status code. (serializes) |
 | `brk` | S | SYS fn=15 | imm |  | Debug breakpoint. (serializes) |
+| `fadd.d` | R | FP fn=0 | f:rd, f:rs1, f:rs2 |  | fd = fs1 + fs2 (binary64). |
+| `fsub.d` | R | FP fn=1 | f:rd, f:rs1, f:rs2 |  | fd = fs1 - fs2. |
+| `fmul.d` | R | FP fn=2 | f:rd, f:rs1, f:rs2 |  | fd = fs1 * fs2. |
+| `fdiv.d` | R | FP fn=3 | f:rd, f:rs1, f:rs2 |  | fd = fs1 / fs2 (the shared iterative divider). |
+| `fsqrt.d` | R | FP fn=4 | f:rd, f:rs1 |  | fd = sqrt(fs1) (the shared iterative divider). |
+| `fmul.s` | R | FP fn=5 | f:rd, f:rs1, f:rs2 |  | fd = fs1 * fs2 (binary32, operands and result in bits 31:0). |
+| `fdiv.s` | R | FP fn=6 | f:rd, f:rs1, f:rs2 |  | fd = fs1 / fs2 (binary32). |
+| `fcvt.s.d` | R | FP fn=7 | f:rd, f:rs1 |  | fd = fs1 rounded to binary32 (overflow, underflow, inexact; a NaN keeps its sign and payload top, quieted). |
+| `fcvt.d.s` | R | FP fn=8 | f:rd, f:rs1 |  | fd = the binary32 in fs1 widened to binary64 (exact; a signaling NaN is quieted and raises invalid). |
+| `fmov.d` | R | FP fn=9 | f:rd, f:rs1 |  | fd = fs1, all 64 bits. No exceptions. |
+| `fneg.d` | R | FP fn=10 | f:rd, f:rs1 |  | fd = fs1 with bit 63 inverted (NaNs too). No exceptions. |
+| `fabs.d` | R | FP fn=11 | f:rd, f:rs1 |  | fd = fs1 with bit 63 cleared (NaNs too). No exceptions. |
+| `fsethi` | R | FP fn=16 | f:rd, rs1 |  | fd[63:32] = rs1; fd[31:0] keeps its value (fd is a source). An integer-to-FP move. |
+| `fsetlo` | R | FP fn=17 | f:rd, rs1 |  | fd[31:0] = rs1; fd[63:32] keeps its value (fd is a source). |
+| `fgethi` | R | FP fn=18 | rd, f:rs1 |  | rd = fs1[63:32]. An FP-to-integer move. |
+| `fgetlo` | R | FP fn=19 | rd, f:rs1 |  | rd = fs1[31:0]. |
 
 ## Guest-semantic operations
 
@@ -372,8 +470,8 @@ Each family expands into sized forms (see *Sized operations* above). `<f>.8`/`<f
 | `nbcd` | 22 | unary | 8 |  | X Z | N Z V C X |  |
 | `mulu` | 23 | full | 16,32 |  | - | N Z V C | .16: 16x16->32 (MULU.W). .32: low 32 bits, V on overflow (MULU.L 32-bit result). High half: base mulhu. |
 | `muls` | 24 | full | 16,32 |  | - | N Z V C |  |
-| `divu` | 25 | tiedfull | 16,32 |  | - | N Z V C | .16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd, N and Z are unchanged, V is set and C cleared (as the 68040 does). .32: quotient only; remainder via base remu. Trap: zero divisor: rd, N, Z and V unchanged, C cleared, and the zero-divide trap (vector 5) taken once the instruction retires |
-| `divs` | 26 | tiedfull | 16,32 |  | - | N Z V C | Trap: zero divisor: as divu |
+| `divu` | 25 | tiedfull | 16,32 |  | N Z V | N Z V C | .16: 32/16 -> remainder:quotient (DIVU.W); on overflow rd, N and Z are unchanged, V is set and C cleared (as the 68040 does). .32: quotient only; remainder via base remu. Trap: zero divisor: rd, N, Z and V unchanged, C cleared, and the zero-divide trap (vector 5) taken once the instruction retires |
+| `divs` | 26 | tiedfull | 16,32 |  | N Z V | N Z V C | Trap: zero divisor: as divu |
 | `ext` | 27 | unary | 16,32 |  | - | N Z V C | .16: EXT.W (byte to word, merged). .32: EXT.L (word to long). |
 | `extb` | 28 | unary | 32 |  | - | N Z V C | EXTB.L (byte to long). |
 | `btst` | 29 | compare | 8,32 | yes | N V C | N Z V C | Bit test: only Z changes, so NZVC is read and merged. .8 for memory operands (bit mod 8), .32 for Dn (bit mod 32). |
@@ -680,8 +778,8 @@ unsigned k = b & (n - 1); Z = !((a >> k) & 1); r = (a | (1u << k)) & m; N = nin;
 | 3 | `ls` | `C || Z` | `ge` | `(int32_t)a >= (int32_t)b` |
 | 4 | `cc` | `!C` | `ltu` | `a < b` |
 | 5 | `cs` | `C` | `geu` | `a >= b` |
-| 6 | `ne` | `!Z` |  |  |
-| 7 | `eq` | `Z` |  |  |
+| 6 | `ne` | `!Z` | `u` | `if (uin) npc = pc + IMM;` (the `b.u` op) |
+| 7 | `eq` | `Z` | `nu` | `if (!uin) npc = pc + IMM;` (the `b.nu` op) |
 | 8 | `vc` | `!V` |  |  |
 | 9 | `vs` | `V` |  |  |
 | 10 | `pl` | `!N` |  |  |
@@ -722,8 +820,19 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | `cas.8` | CAS | cas | 1 | Compare-and-swap byte: if [rs1 + imm] == rs2[7:0], store rd[7:0]; rd = the old byte. Atomic (as SPARC CASA); 68k CAS on the PLA path. |
 | `cas.16` | CAS | cas | 2 |  |
 | `cas.32` | CAS | cas | 4 |  |
-| `probe.r` | PROBER | probe | 0 | Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). The access would succeed if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga. |
-| `probe.w` | PROBEW | probe | 0 | As probe.r, translating for a write. |
+| `probe.r` | PROBER | probe, forms .us/.ua write u | 0 | Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). With translation disabled (TC.E = 0) and no TTR matching, rd = 0 (the access is untranslated). The access would succeed (ok, spec probe_ok) if translation is disabled and no TTR matched (rd = 0), or if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga. probe.r.us also sets the millicode predicate u to that success (ok); probe.r.ua sets u = u && ok, so a chain of probes leaves u set only if every probed access would succeed. |
+| `probe.w` | PROBEW | probe, forms .us/.ua write u | 0 | As probe.r, translating for a write (ok also needs W clear); probe.w.us / probe.w.ua write u as probe.r.us / probe.r.ua. |
+| `ld.c.8u` | LDC | load, reads u | 1 | Conditional load: if u is set, exactly ld.8u; if u is clear, rd = 0 and no access is made (no translation, no fault). |
+| `ld.c.8s` | LDC | load (signed), reads u | 1 | Conditional load: if u is set, exactly ld.8s; if u is clear, rd = 0 and no access is made. |
+| `ld.c.16u` | LDC | load, reads u | 2 | Conditional load: if u is set, exactly ld.16u; if u is clear, rd = 0 and no access is made. |
+| `ld.c.16s` | LDC | load (signed), reads u | 2 | Conditional load: if u is set, exactly ld.16s; if u is clear, rd = 0 and no access is made. |
+| `ld.c.32` | LDC | load, reads u | 4 | Conditional load: if u is set, exactly ld.32; if u is clear, rd = 0 and no access is made. |
+| `st.c.8` | STC | store, reads u | 1 | Conditional store: if u is set, exactly st.8 (the data is in rd); if u is clear, nothing is stored and no access is made. Only a store that happens is a guest-visible write. |
+| `st.c.16` | STC | store, reads u | 2 | Conditional store: if u is set, exactly st.16; if u is clear, nothing is stored. |
+| `st.c.32` | STC | store, reads u | 4 | Conditional store: if u is set, exactly st.32; if u is clear, nothing is stored. |
+| `stu.c.8` | STC | store lock-end, reads u | 1 | Conditional unlocking store: if u is set, exactly stu.8; if u is clear, nothing is stored. It releases the lock (ends the locked sequence) either way. |
+| `stu.c.16` | STC | store lock-end, reads u | 2 | Conditional unlocking store: if u is set, exactly stu.16; if u is clear, nothing is stored. It releases the lock either way. |
+| `stu.c.32` | STC | store lock-end, reads u | 4 | Conditional unlocking store: if u is set, exactly stu.32; if u is clear, nothing is stored. It releases the lock either way. |
 | `st.8.pre` | STPRE8 | store | 1 |  |
 | `st.16.pre` | STPRE16 | store | 2 |  |
 | `st.32.pre` | STPRE32 | store | 4 |  |
@@ -750,9 +859,11 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | 0x0c | `usp` | all | Inactive user stack pointer. |
 | 0x0d | `isp` | all | Inactive interrupt stack pointer. |
 | 0x0e | `msp` | all | Inactive master stack pointer. |
-| 0x20 | `fpcr` | all | Reserved for the FP extension. |
-| 0x21 | `fpsr` | all | Reserved for the FP extension. |
-| 0x22 | `fpiar` | all | Reserved for the FP extension. |
+| 0x20 | `fpcr` | all | 68881 FPCR: exception enables 15:8, rounding precision 7:6, rounding mode 5:4 (the FP ops' dynamic rounding mode). All 32 bits are kept (millicode masks what a 68k FMOVE writes). |
+| 0x21 | `fpsr` | `0x0ffffff8` | 68881 FPSR: condition codes 27:24, quotient 23:16, exception status 15:8, accrued exceptions 7:3. |
+| 0x22 | `fpiar` | all | 68881 FPIAR: the address of the last FP instruction that set it. |
+| 0x23 | `fflags` | `0x0000001f` | IEEE exceptions accrued by the FP ops: NV 4, DZ 3, OF 2, UF 1, NX 0. Every FP arithmetic or conversion op ORs in what it raises; a read sees every older FP op's flags (an implementation orders it after them). |
+| 0x24 | `fpused` | `0x00000001` | Bit 0: the FPU has been used since its last reset (68040 FSAVE: an idle frame; clear: a null frame). Not 68k-visible. |
 | 0x40 | `mstatus` | all | Micro-engine status: pending interrupt level, trace pending, locked-sequence active. |
 | 0x41 | `fault_addr` | all | Guest access fault: faulting address (68040 frame FA and WB3A). |
 | 0x42 | `fault_status` | all | Guest access fault: 68040 special status word (SSW): read/write, size, transfer type and modifier, continuation bits. |
