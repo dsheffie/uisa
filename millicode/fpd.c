@@ -252,9 +252,17 @@ inline ea_t ea_calc(u32 mode, u32 reg, u32 size, u32 off, u32 e01, u32 e23, u32 
   return e;
 }
 
+// an immediate's longword at a, as q800sim fetches the instruction stream:
+// two words (fetch16), so a fetch fault reports SIZE word and the first
+// word that faults (W6: an immediate on the next page)
+inline u32 imm32(u32 a) {
+  u32 hi = __ld_16u_gp(a);
+  return (hi << 16) | __ld_16u_gp(a + 2);
+}
+
 // guest loads of an operand (program space for an immediate)
 inline u32 ld32(ea_t e, u32 k) {
-  if (e.imm) return __ld_32_gp(e.a + k);
+  if (e.imm) return imm32(e.a + k);
   return __ld_32_gd(e.a + k);
 }
 
@@ -340,9 +348,9 @@ inline void fmovem_ctl(u32 op, u32 cmd, u32 e01, u32 e23, u32 pc) {
     u32 v4 = 0;
     u32 v2 = 0;
     u32 v1 = 0;
-    if (list & 4) { v4 = __ld_32_gp(a); a = a + 4; }
-    if (list & 2) { v2 = __ld_32_gp(a); a = a + 4; }
-    if (list & 1) { v1 = __ld_32_gp(a); a = a + 4; }
+    if (list & 4) { v4 = imm32(a); a = a + 4; }
+    if (list & 2) { v2 = imm32(a); a = a + 4; }
+    if (list & 1) { v1 = imm32(a); a = a + 4; }
     mark_used();
     if (list & 4) ctl_write(4, v4);
     if (list & 2) ctl_write(2, v2);
@@ -652,7 +660,7 @@ entry void fpd_gen(void) {
       src = i32_to_d((s16)w);
     } else {
       u32 b;
-      if (e.imm) b = __ld_8u_gp(e.a);
+      if (e.imm) b = __ld_16u_gp(e.a - 1) & 0xff;   // (the word, as fetched)
       else b = __ld_8u_gd(e.a);
       src = i32_to_d((s8)b);
     }
