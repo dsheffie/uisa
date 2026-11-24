@@ -1,0 +1,426 @@
+# 68k -> uisa micro-op flows for the PLA path.
+#
+# A flow is built from three parts:
+#   1. addressing-mode fragments (`ea_modes`) for the source and destination,
+#      which compute the address, load a memory operand into a temporary and
+#      update An for (An)+ / -(An);
+#   2. the operation's template (`ops`), chosen by destination kind and size;
+#   3. a store, when the destination is memory.
+# PLA flows retire atomically, so the order of address-register updates
+# relative to loads and stores does not affect restartability.
+#
+# A pure store to a -(An) or (An)+ destination uses the writeback stores
+# (st.<w>.pre / st.<w>.post) instead of a separate address update; a
+# read-modify-write destination still uses the fragment's addi.
+#
+# PLA uops are not encoded: immediates are full 32-bit values even where the
+# corresponding millicode encoding has a narrower field. tools/flows.py checks
+# each expanded uop against spec/uisa.yaml using small representative values.
+#
+# Template placeholders:
+#   {S}   source value: a guest register, or the temp a memory source was loaded into
+#   {D}   destination: a guest register, or the temp holding a memory destination
+#   {w}   operand width (8/16/32)            {g}   the op's guest-op family name
+#   {imm} immediate operand                  {q}   quick value (ADDQ/SUBQ 1-8, MOVEQ, shift count)
+#   {X}   the data register in bits 11:9 (shift count, bit number)
+#   {A}   the address register in bits 2:0 (LINK, UNLK)
+#   {EA}  a register holding the effective address (computed into a temp if needed)
+#   {base}/{disp}  the effective address as base register + displacement
+#   {cc}  condition (from the opword)        {disp_br} branch target, relative to the instruction
+#   {len} instruction length in bytes        {T}   scratch temp
+#
+# Template keys, most specific first: [imm_]<dst>[32], where <dst> is reg (Dn),
+# an (An), mem, or none (no destination); "32" selects the long-size variant;
+# imm_ variants are used when the source is an immediate. `any` is the fallback.
+
+# t0/t1: source/destination values; t2/t3: source/destination addresses; t4: template scratch {T}
+temps: {t0: x28, t1: x29, t2: x30, t3: x31, t4: x27}
+
+ea_modes:
+  Dn:           {reg: "d{r}"}
+  An:           {reg: "a{r}"}
+  "(An)":       {base: "a{r}", disp: "0"}
+  "(An)+":      {base: "a{r}", disp: "0", post: ["addi a{r}, a{r}, {inc}"]}
+  "-(An)":      {pre: ["addi a{r}, a{r}, -{inc}"], base: "a{r}", disp: "0"}
+  "(d16,An)":   {base: "a{r}", disp: "{d16}"}
+  "(d8,An,Xn)": {pre: ["sext16 {at}, d1", "sh2add {at}, a{r}, {at}"], base: "{at}", disp: "{d8}",
+                 note: "representative brief index: Xn.W*4; an Xn.L index drops the sext16"}
+  "abs.W":      {base: "x0", disp: "{abs}"}
+  "abs.L":      {base: "x0", disp: "{abs}"}
+  "(d16,PC)":   {pre: ["gpcaddi {at}, {pcd}"], base: "{at}", disp: "0"}
+  "(d8,PC,Xn)": {pre: ["gpcaddi {at}, {pcd8}", "sext16 {s}, d1", "sh2add {at}, {at}, {s}"], base: "{at}", disp: "0"}
+  "#imm":       {imm: true}
+  "#q":         {imm: true}
+
+# How each operation uses its operands: src read|addr|none, dst
+# read|rmw|write|none. `store` names what a memory destination stores.
+ops:
+  MOVE:
+    src: read
+    dst: write
+    store: S
+    reg32: ["mov.32 {D}, {S}"]
+    reg: ["mov.{w} {D}, {S}"]
+    imm_reg32: ["movi.32 {D}, {imm}"]
+    imm_reg: ["movi.{w} {D}, {imm}"]
+    mem32: ["mov.32 x0, {S}"]
+    mem: ["mov.{w}z x0, {S}"]
+  MOVEA:
+    src: read
+    dst: write
+    an32: ["add {D}, {S}, x0"]
+    an: ["sext16 {D}, {S}"]
+    imm_an: ["addi {D}, x0, {imm}"]
+  MOVEQ:
+    src: read
+    dst: write
+    any: ["movi.32 {D}, {q}"]
+  CLR:
+    dst: write
+    store: x0
+    reg32: ["mov.32 {D}, x0"]
+    reg: ["mov.{w} {D}, x0"]
+    mem: ["mov.32 x0, x0"]
+  TST:
+    src: read
+    none32: ["mov.32 x0, {S}"]
+    none: ["mov.{w}z x0, {S}"]
+  NEG: {dst: rmw, g: neg, template: unary}
+  NOT: {dst: rmw, g: not, template: unary}
+  NEGX: {dst: rmw, g: negx, template: unary}
+  ADD: {src: read, dst: rmw, g: add, template: alu}
+  SUB: {src: read, dst: rmw, g: sub, template: alu}
+  AND: {src: read, dst: rmw, g: and, template: alu}
+  OR: {src: read, dst: rmw, g: or, template: alu}
+  EOR: {src: read, dst: rmw, g: eor, template: alu}
+  ADDI: {src: read, dst: rmw, g: add, template: alu}
+  SUBI: {src: read, dst: rmw, g: sub, template: alu}
+  ANDI: {src: read, dst: rmw, g: and, template: alu}
+  ORI: {src: read, dst: rmw, g: or, template: alu}
+  EORI: {src: read, dst: rmw, g: eor, template: alu}
+  ADDX: {src: read, dst: rmw, g: addx, template: alu}
+  SUBX: {src: read, dst: rmw, g: subx, template: alu}
+  CMP: {src: read, dst: read, g: cmp, template: compare}
+  CMPI: {src: read, dst: read, g: cmp, template: compare}
+  CMPM: {src: read, dst: read, g: cmp, template: compare}   # (Ay)+ is updated before (Ax)+ is read
+  ADDQ:
+    src: read
+    dst: rmw
+    reg32: ["addi.32 {D}, {D}, {q}"]
+    reg: ["addi.{w} {D}, {q}"]
+    an: ["addi {D}, {D}, {q}"]
+    mem32: ["addi.32 {D}, {D}, {q}"]
+    mem: ["addi.{w}z {D}, {D}, {q}"]
+  SUBQ:
+    src: read
+    dst: rmw
+    reg32: ["subi.32 {D}, {D}, {q}"]
+    reg: ["subi.{w} {D}, {q}"]
+    an: ["addi {D}, {D}, -{q}"]
+    mem32: ["subi.32 {D}, {D}, {q}"]
+    mem: ["subi.{w}z {D}, {D}, {q}"]
+  ADDA:
+    src: read
+    dst: rmw
+    an32: ["add {D}, {D}, {S}"]
+    an: ["sext16 {T}, {S}", "add {D}, {D}, {T}"]
+    imm_an: ["addi {D}, {D}, {imm}"]
+  SUBA:
+    src: read
+    dst: rmw
+    an32: ["sub {D}, {D}, {S}"]
+    an: ["sext16 {T}, {S}", "sub {D}, {D}, {T}"]
+    imm_an: ["addi {D}, {D}, -{imm}"]
+  CMPA:
+    src: read
+    dst: read
+    an32: ["cmp.32 {D}, {S}"]
+    an: ["sext16 {T}, {S}", "cmp.32 {D}, {T}"]
+    imm_an: ["cmpi.32 {D}, {imm}"]
+  LEA:
+    src: addr
+    dst: write
+    any: ["addi {D}, {base}, {disp}"]
+  PEA:
+    src: addr
+    any: ["st.32.pre.gd {EA}, -4(a7)"]
+  MULU: {src: read, dst: rmw, any: ["mulu.16 {D}, {D}, {S}"]}
+  MULS: {src: read, dst: rmw, any: ["muls.16 {D}, {D}, {S}"]}
+  # a zero divisor leaves Dn alone and traps (vector 5) after the instruction
+  DIVU: {src: read, dst: rmw, any: ["divu.16 {D}, {S}"]}
+  DIVS: {src: read, dst: rmw, any: ["divs.16 {D}, {S}"]}
+  EXT:
+    dst: rmw
+    reg32: ["ext.32 {D}, {D}"]
+    reg: ["ext.16 {D}, {D}"]
+  EXTB: {dst: rmw, any: ["extb.32 {D}, {D}"]}
+  SWAP: {dst: rmw, any: ["rori {D}, {D}, 16", "mov.32 x0, {D}"]}
+  ASL: {src: read, dst: rmw, g: asl, template: shift}
+  ASR: {src: read, dst: rmw, g: asr, template: shift}
+  LSL: {src: read, dst: rmw, g: lsl, template: shift}
+  LSR: {src: read, dst: rmw, g: lsr, template: shift}
+  ROL: {src: read, dst: rmw, g: rol, template: shift}
+  ROR: {src: read, dst: rmw, g: ror, template: shift}
+  ROXL: {src: read, dst: rmw, g: roxl, template: shift}
+  ROXR: {src: read, dst: rmw, g: roxr, template: shift}
+  BTST:
+    src: read
+    dst: read
+    imm_reg32: ["btsti.32 {D}, {imm}"]
+    reg32: ["btst.32 {D}, {S}"]
+    imm_mem: ["btsti.8 {D}, {imm}"]
+    mem: ["btst.8 {D}, {S}"]
+  BCHG: {src: read, dst: rmw, g: bchg, template: bitop}
+  BCLR: {src: read, dst: rmw, g: bclr, template: bitop}
+  BSET: {src: read, dst: rmw, g: bset, template: bitop}
+  Scc:
+    dst: write
+    store: D
+    reg: ["s.{cc} {T}", "mov.8.nf {D}, {T}"]
+    mem: ["s.{cc} {D}"]
+  Bcc: {any: ["gbcc.{cc} {disp_br}"]}
+  BRA: {any: ["gbcc.t {disp_br}"]}
+  BSR: {any: ["gpushr a7, {len}", "gbcc.t {disp_br}"]}
+  DBF:
+    dst: rmw
+    any: ["subi.16.nf {D}, 1", "addi {T}, {D}, 1", "zext16 {T}, {T}", "gbnz {T}, {disp_br}"]
+  # DBcc: when cc holds, Dn is unchanged and the instruction falls through;
+  # otherwise Dn.W -= 1 and it branches unless the old count was 0. Both
+  # choices are made with sel on cc, so the only branch is the guest branch.
+  DBcc:
+    dst: rmw
+    any: ["zext16 x28, {D}", "addi {T}, {D}, -1", "sel.{cc} {T}, {D}, {T}", "mrg16 {D}, {D}, {T}",
+          "sel.{cc} x28, x0, x28", "gbnz x28, {disp_br}"]
+  RTS: {any: ["ld.32.gd {T}, 0(a7)", "addi a7, a7, 4", "gjr {T}, 0"]}
+  JSR:
+    src: addr
+    any: ["gpushr a7, {len}", "gjr {base}, {disp}"]
+  JMP: {src: addr, any: ["gjr {base}, {disp}"]}
+  LINK: {any: ["st.32.pre.gd {A}, -4(a7)", "add {A}, a7, x0", "addi a7, a7, {imm}"]}
+  UNLK: {any: ["add a7, {A}, x0", "ld.32.gd {A}, 0(a7)", "addi a7, a7, 4"]}
+  NOP: {any: ["addi x0, x0, 0"]}
+  EXG: {any: ["add {T}, d1, x0", "add d1, d2, x0", "add d2, {T}, x0"]}
+  MOVEM:
+    sequencer: true
+    note: "hardware sequencer: one load or store per register in the mask plus the An update; counted with movem_regs registers"
+
+# Shared templates referenced by `template:` above.
+templates:
+  alu:
+    imm_reg32: ["{g}i.32 {D}, {D}, {imm}"]
+    imm_reg: ["{g}i.{w} {D}, {imm}"]
+    imm_mem32: ["{g}i.32 {D}, {D}, {imm}"]
+    imm_mem: ["{g}i.{w}z {D}, {D}, {imm}"]
+    reg32: ["{g}.32 {D}, {D}, {S}"]
+    reg: ["{g}.{w} {D}, {S}"]
+    mem32: ["{g}.32 {D}, {D}, {S}"]
+    mem: ["{g}.{w}z {D}, {D}, {S}"]
+  compare:
+    imm_any: ["{g}i.{w} {D}, {imm}"]
+    any: ["{g}.{w} {D}, {S}"]
+  unary:
+    reg32: ["{g}.32 {D}, {D}"]
+    reg: ["{g}.{w} {D}, {D}"]
+    mem32: ["{g}.32 {D}, {D}"]
+    mem: ["{g}.{w}z {D}, {D}"]
+  shift:
+    imm_reg32: ["{g}i.32 {D}, {D}, {q}"]
+    imm_reg: ["{g}i.{w} {D}, {q}"]
+    reg32: ["{g}.32 {D}, {D}, {X}"]
+    reg: ["{g}.{w} {D}, {X}"]
+    mem: ["{g}i.16z {D}, {D}, 1"]
+  bitop:
+    imm_reg32: ["{g}i.32 {D}, {D}, {imm}"]
+    reg32: ["{g}.32 {D}, {D}, {S}"]
+    imm_mem: ["{g}i.8z {D}, {D}, {imm}"]
+    mem: ["{g}.8z {D}, {D}, {S}"]
+
+# Handled entirely in millicode (serializing, rare, or data-dependent).
+millicode:
+  - MOVEC
+  - MOVES
+  - RTE
+  - RTD
+  - RTR
+  - TRAP
+  - TRAPV
+  - STOP
+  - RESET
+  - ILLEGAL
+  - BKPT
+  - CHK
+  - CMP2/CHK2
+  - CAS
+  - CAS2
+  - TAS
+  - ABCD
+  - SBCD
+  - NBCD
+  - PACK
+  - UNPK
+  - MOVEP
+  - MULx
+  - DIVx
+  - BFTST
+  - BFEXTU
+  - BFCHG
+  - BFEXTS
+  - BFCLR
+  - BFFFO
+  - BFSET
+  - BFINS
+  - LINE-A
+  - LINE-F
+  - FPU-gen
+  - FBcc
+  - FScc/FDBcc/FTRAPcc
+  - FSAVE
+  - FRESTORE
+  - PFLUSH
+  - PTEST
+  - CINV
+  - CPUSH
+  - MOVE16
+  - TRAPcc
+  - "MOVE to/from SR, CCR, USP"
+  - "ORI/ANDI/EORI to CCR, SR"
+
+# Bitfield instructions: a second-level decode on the bitfield extension
+# word (always at offset 2). When the offset and width are both immediates
+# (Do = Dw = 0) and, for a memory operand, the field lies within 4 bytes, the
+# front end issues one of these flows instead of entering millicode. For
+# memory it picks the flow by the number of bytes the field touches,
+# n = ((offset & 7) + width + 7) / 8, and reads and writes exactly those bytes.
+# Everything else (register offset or width, a 5-byte field, BFFFO on memory)
+# stays in millicode.
+#
+# Values the front end takes from the extension word:
+#   {bf}   packed field descriptor for bfextui/bfextsi/bfinsi: for a register,
+#          (offset, width); for memory, the field's position within the
+#          n-byte value loaded, (32 - 8n + (offset & 7), width)
+#   {bfi}  descriptor of the low `width` bits of a register (BFINS flags)
+#   {Dx}   the data register in bits 14:12
+#   {disp} the EA displacement plus offset / 8 (whole bytes into the field)
+# {V} is the field's container (Dn, or the temp holding the loaded bytes),
+# {F} the field sign-extended (flags: mov.32 x0, F gives N and Z, clears V, C),
+# {T} scratch.
+#
+# A fifth flow, `long`, is used when the field is a whole long at a byte
+# boundary (width 32, offset a multiple of 8; for a register, offset 0): the
+# operand itself is the field, so BFEXTU/BFEXTS are MOVE.L and BFTST is TST.L.
+# Ops without a `long` body use their 4-byte (or register) flow.
+bitfield:
+  load:
+    1: ["ld.8u.gd {V}, {disp}({base})"]
+    2: ["ld.16u.gd {V}, {disp}({base})"]
+    3: ["ld.16u.gd {V}, {disp}({base})", "ld.8u.gd {T}, {disp2}({base})", "slli {V}, {V}, 8", "or {V}, {V}, {T}"]
+    4: ["ld.32.gd {V}, {disp}({base})"]
+  store:
+    1: ["st.8.gd {V}, {disp}({base})"]
+    2: ["st.16.gd {V}, {disp}({base})"]
+    3: ["srli {T}, {V}, 8", "st.16.gd {T}, {disp}({base})", "st.8.gd {V}, {disp2}({base})"]
+    4: ["st.32.gd {V}, {disp}({base})"]
+  ops:
+    BFTST:  {body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}"], long: ["mov.32 x0, {V}"]}
+    BFEXTU: {body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "bfextui {Dx}, {V}, {bf}"], long: ["mov.32 {Dx}, {V}"]}
+    BFEXTS: {body: ["bfextsi {Dx}, {V}, {bf}", "mov.32 {Dx}, {Dx}"], long: ["mov.32 {Dx}, {V}"]}
+    BFFFO:  {reg_only: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "addi {T}, x0, {bfd}", "bfffo {Dx}, {V}, {T}"]}
+    BFCLR:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "bfinsi {V}, x0, {bf}"]}
+    BFSET:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "addi {F}, x0, -1", "bfinsi {V}, {F}, {bf}"]}
+    BFCHG:  {write: true, body: ["bfextsi {F}, {V}, {bf}", "mov.32 x0, {F}", "orn {F}, x0, {F}", "bfinsi {V}, {F}, {bf}"]}
+    BFINS:  {write: true, body: ["bfextsi {F}, {Dx}, {bfi}", "mov.32 x0, {F}", "bfinsi {V}, {Dx}, {bf}"]}
+
+# MOVEC: a second-level decode on the extension word. The front end knows S
+# and M at decode (every write to them serializes), so in supervisor state it
+# issues one of these flows, chosen by the control register (the 16-way index
+# (code bit 11) << 3 | code bits 2:0; codes with bits 10:3 set, and code 802,
+# stay in millicode, which raises the illegal-instruction exception). In user
+# state the front end enters millicode, which raises the privilege violation.
+# {Rn} is the general register in extension bits 15:12 (D0-D7, A0-A7). ISP is
+# the active A7 while M = 0, and MSP while M = 1; the `active` forms are used
+# for whichever is active, and M = 1 stays in millicode.
+movec:
+  regs: [sfc, dfc, cacr, tc, itt0, itt1, dtt0, dtt1, usp, vbr, null, msp, isp, mmusr, urp, srp]
+  read: ["csrr {Rn}, {csr}"]
+  write: ["csrw {csr}, {Rn}"]
+  active_read: ["add {Rn}, a7, x0"]
+  active_write: ["add a7, {Rn}, x0"]
+
+# MOVE SR,Dn / MOVE Dn,SR / MOVE #imm,SR in supervisor state with M = 0
+# (known at decode, as for MOVEC; otherwise millicode). MOVE Dn,SR may leave
+# supervisor state, so its flow switches stacks without branches: with
+# S' = the new S bit, ISP' = S' ? ISP : A7 and A7' = S' ? A7 : USP. For
+# MOVE #imm,SR the front end sees the new S bit and picks `imm` (S stays 1)
+# or `imm_user` (S goes to 0); an immediate with M = 1 stays in millicode.
+# {Dn} is the data register in opword bits 2:0, {T} scratch.
+sr:
+  from_sr: ["rdccr {T}", "or {T}, {T}, gsr", "mrg16 {Dn}, {Dn}, {T}"]
+  to_sr: ["andi x28, {Dn}, 0x2000", "csrr x29, isp", "czeqz x29, x29, x28", "cznez x30, a7, x28",
+          "or x29, x29, x30", "csrr x31, usp", "cznez x31, x31, x28", "czeqz a7, a7, x28", "or a7, a7, x31",
+          "csrw isp, x29", "wrccr {Dn}", "andi gsr, {Dn}, 0xf700"]
+  imm: ["addi {T}, x0, {imm.W@2}", "wrccr {T}", "andi gsr, {T}, 0xf700"]
+  imm_user: ["addi {T}, x0, {imm.W@2}", "wrccr {T}", "andi gsr, {T}, 0xf700", "csrw isp, a7", "csrr a7, usp"]
+
+# MULU.L / MULS.L <ea>,Dl or <ea>,Dh:Dl: a second-level decode on the
+# extension word (offset 2; the operand's extension words follow at 4). The
+# front end picks the flow by extension bits 11:10 (signed, 64-bit result) and
+# substitutes {Dl} (bits 14:12) and {Dh} (bits 2:0). The 32-bit forms are one
+# guest multiply (V on overflow). The 64-bit forms compute both halves into
+# temps, then set N from the high half and Z from all 64 bits by testing
+# hi | (lo != 0) (V = C = 0, X kept), and write Dl then Dh, so Dh wins when
+# they are the same register, as in millicode.
+mull:
+  u32: ["mulu.32 {Dl}, {Dl}, {S}"]
+  s32: ["muls.32 {Dl}, {Dl}, {S}"]
+  u64: ["mul x29, {Dl}, {S}", "mulhu x31, {Dl}, {S}", "sltu x27, x0, x29", "or x27, x31, x27", "mov.32 x0, x27",
+        "add {Dl}, x29, x0", "add {Dh}, x31, x0"]
+  s64: ["mul x29, {Dl}, {S}", "mulh x31, {Dl}, {S}", "sltu x27, x0, x29", "or x27, x31, x27", "mov.32 x0, x27",
+        "add {Dl}, x29, x0", "add {Dh}, x31, x0"]
+
+# DIVU.L / DIVS.L <ea>,Dq and <ea>,Dr:Dq with a 32-bit dividend (extension
+# bit 10 clear; the 64-bit dividend stays in millicode). The front end picks
+# by bit 11 (signed) and whether Dr = Dq (quotient only), and substitutes
+# {Dq} (bits 14:12) and {Dr} (bits 2:0). A zero divisor makes the guest divide
+# leave its destination alone and flag the zero-divide trap, taken once the
+# instruction retires (so an (An)+ or -(An) update stands); DIVS.L overflow
+# (0x80000000 / -1) leaves it alone with V set. The base remainder ops do not
+# know either case, so Dr is selected branch-free: it keeps its old value when
+# k = 0, where k is the divisor, or (signed) zero on overflow too.
+divl:
+  u32: ["add x29, {Dq}, x0", "divu.32 x29, {S}", "remu x31, {Dq}, {S}", "czeqz x31, x31, {S}",
+        "cznez x27, {Dr}, {S}", "or {Dr}, x31, x27", "add {Dq}, x29, x0"]
+  s32: ["add x29, {Dq}, x0", "divs.32 x29, {S}", "rem x31, {Dq}, {S}", "addi x27, {S}, 1",
+        "xori x30, {Dq}, -0x80000000", "or x27, x27, x30", "czeqz x27, {S}, x27", "czeqz x31, x31, x27",
+        "cznez x27, {Dr}, x27", "or {Dr}, x31, x27", "add {Dq}, x29, x0"]
+  u32q: ["divu.32 {Dq}, {S}"]
+  s32q: ["divs.32 {Dq}, {S}"]
+
+# MOVES <ea>,Rn / Rn,<ea> in supervisor state (known at decode; user state
+# enters millicode, which raises the privilege violation). The front end picks
+# by extension bit 11 (Rn to memory) and bit 15 (An) and substitutes {Rn}
+# (bits 15:12); the EA's extension words follow at offset 4. The galt loads
+# and stores take their function code from SFC / DFC when they execute, so
+# the front end needs neither. Loads finish the An update before writing Rn
+# (so Rn wins when it is that An); stores copy Rn first (so the old value is
+# stored when Rn is the -(An) / (An)+ register). As in millicode, a byte or
+# word load merges into Dn and sign-extends into An.
+moves:
+  load_dn: {B: ["mrg8 {Rn}, {Rn}, {V}"], W: ["mrg16 {Rn}, {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
+  load_an: {B: ["sext8 {Rn}, {V}"], W: ["sext16 {Rn}, {V}"], L: ["add {Rn}, {V}, x0"]}
+
+# CAS Dc,Du,<ea> with a memory-alterable <ea> (other modes enter millicode,
+# which raises the illegal instruction). The front end substitutes {Du}
+# (extension bits 8:6) and {Dc} (bits 2:0); the EA's extension words follow
+# at offset 4. One cas uop does the atomic compare-and-swap: {V} goes in as
+# Du and comes back as the old operand. The flags are CMP Dc,<ea>'s, and Dc
+# takes the old operand in its low bits, which leaves it unchanged when the
+# compare succeeded, so no uop is conditional. (An)+ / -(An) update as for any
+# memory operand; the flow retires atomically.
+cas:
+  swap: ["add {V}, {Du}, x0"]
+  B: ["cmp.8 {V}, {Dc}", "mov.8.nf {Dc}, {V}"]
+  W: ["cmp.16 {V}, {Dc}", "mov.16.nf {Dc}, {V}"]
+  L: ["cmp.32 {V}, {Dc}", "add {Dc}, {V}, x0"]
+
+params:
+  movem_regs: 5   # assumed registers per MOVEM for the uop estimate

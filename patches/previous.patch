@@ -1,0 +1,469 @@
+diff --git a/previous-code/src/CMakeLists.txt b/previous-code/src/CMakeLists.txt
+index 31e9fc4..4c076ba 100644
+--- a/previous-code/src/CMakeLists.txt
++++ b/previous-code/src/CMakeLists.txt
+@@ -7,6 +7,14 @@ set(SOURCES
+ 	scc.c scsi.c shortcut.c snd.c str.c sysReg.c tablet.c timing.c tmc.c video.c 
+ 	NextBus.cpp)
+ 
++# Optional uisa shadow functional model: cmake -DUISA_DIR=/path/to/uisa
++# (run `make` in uisa first to generate build/uisa.h and build/uisa_flows.inc)
++if(UISA_DIR)
++	set(SOURCES ${SOURCES} ${UISA_DIR}/model/uisa_shadow.cc ${UISA_DIR}/model/uisa_machine.cc)
++	include_directories(${UISA_DIR}/model ${UISA_DIR}/build)
++	add_definitions(-DUISA_SHADOW)
++endif()
++
+ # When building for macOS, define specific sources for gui and resources
+ if(ENABLE_OSX_BUNDLE)
+ 	set(GUIOSX_SOURCES
+diff --git a/previous-code/src/cpu/cpummu.h b/previous-code/src/cpu/cpummu.h
+index 6dd9e35..2079de5 100644
+--- a/previous-code/src/cpu/cpummu.h
++++ b/previous-code/src/cpu/cpummu.h
+@@ -206,12 +206,13 @@ extern void REGPARAM3 dfc_put_long(uaecptr addr, uae_u32 val) REGPARAM;
+ extern void REGPARAM3 dfc_put_word(uaecptr addr, uae_u16 val) REGPARAM;
+ extern void REGPARAM3 dfc_put_byte(uaecptr addr, uae_u8 val) REGPARAM;
+ 
+-#define sfc040_get_long sfc_get_long
+-#define sfc040_get_word sfc_get_word
+-#define sfc040_get_byte sfc_get_byte
+-#define dfc040_put_long dfc_put_long
+-#define dfc040_put_word dfc_put_word
+-#define dfc040_put_byte dfc_put_byte
++/* MOVES: logging wrappers (defined with the 040 accessors below) */
++#define sfc040_get_long uisa_sfc040_get_long
++#define sfc040_get_word uisa_sfc040_get_word
++#define sfc040_get_byte uisa_sfc040_get_byte
++#define dfc040_put_long uisa_dfc040_put_long
++#define dfc040_put_word uisa_dfc040_put_word
++#define dfc040_put_byte uisa_dfc040_put_byte
+ 
+ #define sfc060_get_long sfc_get_long
+ #define sfc060_get_word sfc_get_word
+@@ -817,29 +818,78 @@ static ALWAYS_INLINE void uae_mmu_put_move16(uaecptr addr, uae_u32 *val)
+ }
+ 
+ // normal 040
++/* uisa shadow model: log each access while an instruction is being shadowed */
++#ifdef UISA_SHADOW
++#include "uisa_shadow.h"
++#define UISA_LOG(k, a, s, v) do { if (uisa_shadow_logging) uisa_shadow_log ((k), (a), (s), (v)); } while (0)
++#else
++#define UISA_LOG(k, a, s, v) do { } while (0)
++#endif
++STATIC_INLINE uae_u32 uisa_sfc040_get_long (uaecptr addr)
++{
++	uae_u32 v = sfc_get_long (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 4, v);
++	return v;
++}
++STATIC_INLINE uae_u16 uisa_sfc040_get_word (uaecptr addr)
++{
++	uae_u16 v = sfc_get_word (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 2, v);
++	return v;
++}
++STATIC_INLINE uae_u8 uisa_sfc040_get_byte (uaecptr addr)
++{
++	uae_u8 v = sfc_get_byte (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 1, v);
++	return v;
++}
++STATIC_INLINE void uisa_dfc040_put_long (uaecptr addr, uae_u32 v)
++{
++	UISA_LOG(UISA_LOG_WRITE, addr, 4, v);
++	dfc_put_long (addr, v);
++}
++STATIC_INLINE void uisa_dfc040_put_word (uaecptr addr, uae_u16 v)
++{
++	UISA_LOG(UISA_LOG_WRITE, addr, 2, v);
++	dfc_put_word (addr, v);
++}
++STATIC_INLINE void uisa_dfc040_put_byte (uaecptr addr, uae_u8 v)
++{
++	UISA_LOG(UISA_LOG_WRITE, addr, 1, v);
++	dfc_put_byte (addr, v);
++}
+ STATIC_INLINE void put_byte_mmu040 (uaecptr addr, uae_u32 v)
+ {
++	UISA_LOG(UISA_LOG_WRITE, addr, 1, v & 0xff);
+ 	uae_mmu040_put_byte (addr, v);
+ }
+ STATIC_INLINE void put_word_mmu040 (uaecptr addr, uae_u32 v)
+ {
++	UISA_LOG(UISA_LOG_WRITE, addr, 2, v & 0xffff);
+ 	uae_mmu040_put_word (addr, v);
+ }
+ STATIC_INLINE void put_long_mmu040 (uaecptr addr, uae_u32 v)
+ {
++	UISA_LOG(UISA_LOG_WRITE, addr, 4, v);
+ 	uae_mmu040_put_long (addr, v);
+ }
+ STATIC_INLINE uae_u32 get_byte_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu040_get_byte (addr);
++	uae_u32 v = uae_mmu040_get_byte (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 1, v & 0xff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_word_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu040_get_word (addr);
++	uae_u32 v = uae_mmu040_get_word (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 2, v & 0xffff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_long_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu040_get_long (addr);
++	uae_u32 v = uae_mmu040_get_long (addr);
++	UISA_LOG(UISA_LOG_READ, addr, 4, v);
++	return v;
+ }
+ // normal 060
+ STATIC_INLINE void put_byte_mmu060 (uaecptr addr, uae_u32 v)
+@@ -945,54 +995,73 @@ STATIC_INLINE uae_u32 get_rmw_long_mmu060 (uaecptr addr)
+ STATIC_INLINE void put_lrmw_byte_mmu040 (uaecptr addr, uae_u32 v)
+ {
+ 	uae_mmu_put_lrmw (addr, v, sz_byte, 0);
++	UISA_LOG(UISA_LOG_WRITE, addr, 1, v & 0xff);
+ }
+ STATIC_INLINE void put_lrmw_word_mmu040 (uaecptr addr, uae_u32 v)
+ {
+ 	uae_mmu_put_lrmw (addr, v, sz_word, 0);
++	UISA_LOG(UISA_LOG_WRITE, addr, 2, v & 0xffff);
+ }
+ STATIC_INLINE void put_lrmw_long_mmu040 (uaecptr addr, uae_u32 v)
+ {
+ 	uae_mmu_put_lrmw (addr, v, sz_long, 0);
++	UISA_LOG(UISA_LOG_WRITE, addr, 4, v);
+ }
+ STATIC_INLINE uae_u32 get_lrmw_byte_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu_get_lrmw (addr, sz_byte, 0);
++	uae_u32 v = uae_mmu_get_lrmw (addr, sz_byte, 0);
++	UISA_LOG(UISA_LOG_READ, addr, 1, v & 0xff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_lrmw_word_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu_get_lrmw (addr, sz_word, 0);
++	uae_u32 v = uae_mmu_get_lrmw (addr, sz_word, 0);
++	UISA_LOG(UISA_LOG_READ, addr, 2, v & 0xffff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_lrmw_long_mmu040 (uaecptr addr)
+ {
+-	return uae_mmu_get_lrmw (addr, sz_long, 0);
++	uae_u32 v = uae_mmu_get_lrmw (addr, sz_long, 0);
++	UISA_LOG(UISA_LOG_READ, addr, 4, v);
++	return v;
+ }
+ 
+ STATIC_INLINE uae_u32 get_ibyte_mmu040 (int o)
+ {
+ 	uae_u32 pc = m68k_getpci () + o;
+-	return uae_mmu040_get_iword (pc);
++	uae_u32 v = uae_mmu040_get_iword (pc);
++	UISA_LOG(UISA_LOG_IFETCH, pc, 2, v & 0xffff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_iword_mmu040 (int o)
+ {
+ 	uae_u32 pc = m68k_getpci () + o;
+-	return uae_mmu040_get_iword (pc);
++	uae_u32 v = uae_mmu040_get_iword (pc);
++	UISA_LOG(UISA_LOG_IFETCH, pc, 2, v & 0xffff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 get_ilong_mmu040 (int o)
+ {
+ 	uae_u32 pc = m68k_getpci () + o;
+-	return uae_mmu040_get_ilong (pc);
++	uae_u32 v = uae_mmu040_get_ilong (pc);
++	UISA_LOG(UISA_LOG_IFETCH, pc, 4, v);
++	return v;
+ }
+ STATIC_INLINE uae_u32 next_iword_mmu040 (void)
+ {
+ 	uae_u32 pc = m68k_getpci ();
+ 	m68k_incpci (2);
+-	return uae_mmu040_get_iword (pc);
++	uae_u32 v = uae_mmu040_get_iword (pc);
++	UISA_LOG(UISA_LOG_IFETCH, pc, 2, v & 0xffff);
++	return v;
+ }
+ STATIC_INLINE uae_u32 next_ilong_mmu040 (void)
+ {
+ 	uae_u32 pc = m68k_getpci ();
+ 	m68k_incpci (4);
+-	return uae_mmu040_get_ilong (pc);
++	uae_u32 v = uae_mmu040_get_ilong (pc);
++	UISA_LOG(UISA_LOG_IFETCH, pc, 4, v);
++	return v;
+ }
+ 
+ STATIC_INLINE uae_u32 get_ibyte_mmu060 (int o)
+diff --git a/previous-code/src/cpu/newcpu.c b/previous-code/src/cpu/newcpu.c
+index 4b43250..cda9f06 100644
+--- a/previous-code/src/cpu/newcpu.c
++++ b/previous-code/src/cpu/newcpu.c
+@@ -18,6 +18,7 @@
+ #define MORE_ACCURATE_68020_PIPELINE 1
+ 
+ #include <inttypes.h>		/* Needed for PRIX64 */
++#include <signal.h>
+ 
+ #include "main.h"
+ #include "compat.h"
+@@ -1920,8 +1921,207 @@ void set_cpu_caches (bool flush)
+ 	flush_cpu_caches(flush);
+ }
+ 
++/* Opcode histogram for micro-engine studies. Set PREVIOUS_OPHIST=<file> to
++ * enable; counts are split by the supervisor bit and written at exit, or on
++ * SIGUSR1 (the snapshot is taken between instructions, on the CPU thread).
++ * Output: one line per executed opword, "opword user_count super_count". */
++static uae_u64 ophist[2][65536];
++static const char *ophist_path;
++static volatile sig_atomic_t ophist_dump_req;
++
++/* Optional exact per-PC counts: set PREVIOUS_PCHIST=<file>. Keyed by
++ * (pc, supervisor bit, opword), because user processes share virtual
++ * addresses. Output: "pc s opword count" per key. Open addressing; once the
++ * table is 3/4 full, new keys are dropped and counted in the header. */
++#define PCHIST_BITS 22
++static uae_u64 *pchist_key, *pchist_cnt;
++static uae_u64 pchist_used, pchist_dropped;
++static const char *pchist_path;
++
++static void pchist_add (uae_u32 pc, int s, uae_u32 opcode)
++{
++	uae_u64 key = ((uae_u64)pc << 17) | ((uae_u64)s << 16) | (opcode & 0xffff) | (1ull << 63);
++	uae_u64 mask = (1ull << PCHIST_BITS) - 1;
++	uae_u64 h = (key * 0x9e3779b97f4a7c15ull) >> (64 - PCHIST_BITS);
++	for (;;) {
++		if (pchist_key[h] == key) {
++			pchist_cnt[h]++;
++			return;
++		}
++		if (pchist_key[h] == 0) {
++			if (pchist_used >= (mask + 1) / 4 * 3) {
++				pchist_dropped++;
++				return;
++			}
++			pchist_key[h] = key;
++			pchist_cnt[h] = 1;
++			pchist_used++;
++			return;
++		}
++		h = (h + 1) & mask;
++	}
++}
++
++static void pchist_dump (void)
++{
++	FILE *f;
++	if (!pchist_path || !(f = fopen (pchist_path, "w")))
++		return;
++	fprintf (f, "# pc s opword count; keys %" PRIu64 " dropped %" PRIu64 "\n", pchist_used, pchist_dropped);
++	for (uae_u64 i = 0; i < (1ull << PCHIST_BITS); i++) {
++		uae_u64 k = pchist_key[i];
++		if (k)
++			fprintf (f, "%08x %d %04x %" PRIu64 "\n", (uae_u32)((k >> 17) & 0xffffffff),
++			         (int)((k >> 16) & 1), (uae_u32)(k & 0xffff), pchist_cnt[i]);
++	}
++	fclose (f);
++}
++
++#ifdef UISA_SHADOW
++/* uisa shadow model: set PREVIOUS_UISA_SHADOW=<report file>. Each 68040
++ * instruction is also run as its uisa micro-op flow and compared with this
++ * emulator's result; see uisa/model/uisa_shadow.h. */
++static const char *uisa_shadow_path;
++
++static void uisa_state (struct uisa_m68k_state *s)
++{
++	for (int i = 0; i < 16; i++)
++		s->r[i] = regs.regs[i];
++	s->pc = m68k_getpc ();
++	MakeSR ();
++	s->sr = regs.sr;
++	s->ctl[UISA_CTL_VBR] = regs.vbr;
++	s->ctl[UISA_CTL_SFC] = regs.sfc;
++	s->ctl[UISA_CTL_DFC] = regs.dfc;
++	s->ctl[UISA_CTL_CACR] = regs.cacr;
++	s->ctl[UISA_CTL_TC] = regs.tcr;
++	s->ctl[UISA_CTL_ITT0] = regs.itt0;
++	s->ctl[UISA_CTL_ITT1] = regs.itt1;
++	s->ctl[UISA_CTL_DTT0] = regs.dtt0;
++	s->ctl[UISA_CTL_DTT1] = regs.dtt1;
++	s->ctl[UISA_CTL_MMUSR] = regs.mmusr;
++	s->ctl[UISA_CTL_URP] = regs.urp;
++	s->ctl[UISA_CTL_SRP] = regs.srp;
++	s->ctl[UISA_CTL_USP] = regs.usp;
++	s->ctl[UISA_CTL_ISP] = regs.isp;
++	s->ctl[UISA_CTL_MSP] = regs.msp;
++}
++
++static void uisa_shadow_pre_hook (uae_u32 opcode)
++{
++	struct uisa_m68k_state s;
++	uisa_state (&s);
++	uisa_shadow_pre (opcode & 0xffff, &s);
++}
++
++static void uisa_shadow_post_hook (void)
++{
++	struct uisa_m68k_state s;
++	uisa_state (&s);
++	uisa_shadow_post (&s);
++}
++
++/* Interrupts and access faults are taken outside an instruction's pre/post
++ * pair; shadow their exception processing as separate events. */
++static void uisa_shadow_exc_pre_hook (int nr, int vector_nr)
++{
++	struct uisa_m68k_state s;
++	struct uisa_fault f;
++	uisa_state (&s);
++	memset (&f, 0, sizeof f);
++	if (nr == 2) {
++		f.addr = regs.mmu_fault_addr;
++		f.ssw = regs.mmu_ssw;
++		f.ea = regs.mmu_effective_addr;
++		f.wb2_status = regs.wb2_status;
++		f.wb2_addr = regs.wb2_address;
++		f.wb3_status = regs.wb3_status;
++		f.wb3_data = regs.wb3_data;
++		for (int i = 0; i < 4; i++)
++			f.pd[i] = mmu040_move16[i];
++	}
++	uisa_shadow_exc_pre (vector_nr, nr >= 24 ? nr - 24 : 0, &s, nr == 2 ? &f : NULL);
++}
++
++static void uisa_shadow_exc_post_hook (void)
++{
++	struct uisa_m68k_state s;
++	uisa_state (&s);
++	uisa_shadow_exc_post (&s);
++}
++#endif
++
++static void ophist_dump (void)
++{
++	FILE *f;
++	ophist_dump_req = 0;
++#ifdef UISA_SHADOW
++	if (uisa_shadow_path)
++		uisa_shadow_dump ();
++#endif
++	pchist_dump ();
++	if (!ophist_path || !(f = fopen (ophist_path, "w")))
++		return;
++	fprintf (f, "# opword user super\n");
++	for (int i = 0; i < 65536; i++) {
++		if (ophist[0][i] | ophist[1][i])
++			fprintf (f, "%04x %" PRIu64 " %" PRIu64 "\n", i, ophist[0][i], ophist[1][i]);
++	}
++	fclose (f);
++}
++
++static void ophist_sigusr1 (int sig)
++{
++	(void)sig;
++	ophist_dump_req = 1;
++}
++
++static void ophist_init (void)
++{
++	static bool done;
++	if (done)
++		return;
++	done = true;
++#ifdef UISA_SHADOW
++	uisa_shadow_path = getenv ("PREVIOUS_UISA_SHADOW");
++	if (uisa_shadow_path) {
++		uisa_shadow_init (uisa_shadow_path);
++		atexit (uisa_shadow_dump);
++		signal (SIGUSR1, ophist_sigusr1);
++	}
++#endif
++	ophist_path = getenv ("PREVIOUS_OPHIST");
++	pchist_path = getenv ("PREVIOUS_PCHIST");
++	if (pchist_path && !ophist_path)
++		ophist_path = "/dev/null";
++	if (!ophist_path)
++		return;
++	if (pchist_path) {
++		pchist_key = calloc (1ull << PCHIST_BITS, sizeof (uae_u64));
++		pchist_cnt = calloc (1ull << PCHIST_BITS, sizeof (uae_u64));
++		if (!pchist_key || !pchist_cnt)
++			pchist_path = NULL;
++	}
++	atexit (ophist_dump);
++	signal (SIGUSR1, ophist_sigusr1);
++}
++
+ STATIC_INLINE void count_instr (uae_u32 opcode)
+ {
++#ifdef UISA_SHADOW
++	if (uisa_shadow_path) {
++		if (ophist_dump_req)
++			ophist_dump ();
++		uisa_shadow_pre_hook (opcode);
++	}
++#endif
++	if (!ophist_path)
++		return;
++	ophist[regs.s ? 1 : 0][opcode & 0xffff]++;
++	if (pchist_path)
++		pchist_add (m68k_getpc (), regs.s ? 1 : 0, opcode);
++	if (ophist_dump_req)
++		ophist_dump ();
+ }
+ 
+ static uae_u32 opcode_swap(uae_u16 opcode)
+@@ -2407,6 +2607,7 @@ void check_prefs_changed_cpu(void)
+ 
+ void init_m68k (void)
+ {
++	ophist_init();
+ 	disasm_init();
+ 	prefs_changed_cpu ();
+ 	update_68k_cycles ();
+@@ -3338,6 +3539,11 @@ static void Exception_mmu (int nr, uaecptr oldpc)
+ 	interrupt = nr >= 24 && nr < 24 + 8;
+ 	if (interrupt)
+ 		vector_nr = iack_cycle(nr);
++#ifdef UISA_SHADOW
++	bool uisa_exc = uisa_shadow_path && currprefs.mmu_model == 68040 && (nr == 2 || interrupt);
++	if (uisa_exc)
++		uisa_shadow_exc_pre_hook (nr, vector_nr);
++#endif
+ 
+ 	// exception vector fetch and exception stack frame
+ 	// operations don't allocate new cachelines
+@@ -3402,6 +3608,10 @@ static void Exception_mmu (int nr, uaecptr oldpc)
+ 		regs.intmask = nr - 24;
+ 	fill_prefetch ();
+ 	exception_check_trace (nr);
++#ifdef UISA_SHADOW
++	if (uisa_exc)
++		uisa_shadow_exc_post_hook ();
++#endif
+ }
+ 
+ static void add_approximate_exception_cycles(int nr)
+@@ -6414,6 +6624,10 @@ static void m68k_run_mmu040 (void)
+ 				mmu_opcode = regs.opcode = x_prefetch (0);
+ 				count_instr (regs.opcode);
+ 				cpu_cycles = (*cpufunctbl[regs.opcode])(regs.opcode);
++#ifdef UISA_SHADOW
++				if (uisa_shadow_path)
++					uisa_shadow_post_hook ();
++#endif
+ 
+ #ifdef WINUAE_FOR_PREVIOUS
+ 				run_other_MPUs();
