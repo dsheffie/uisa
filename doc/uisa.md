@@ -107,6 +107,13 @@ CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or `unlock` ends it.
 All of these execute non-speculatively at the head of the ROB. The machine is
 single-core, so locking only has to exclude DMA.
 
+MOVE16 has `mov16` and `mov16r`: one access that reads a whole 16-byte line
+and writes it over another (the low 4 address bits are ignored), with the
+displacement on the source (`mov16`) or the destination (`mov16r`), so every
+MOVE16 form is one of them first in its flow, followed by its
+postincrements. Like `cas` it executes non-speculatively at the head of the
+ROB; a fault on either side writes nothing.
+
 Stores can write back their base register: `st.<w>.pre` stores to `rs1 + imm`
 and sets `rd` to that address, `st.<w>.post` stores to `rs1` and sets `rd` to
 `rs1 + imm`. `rd` is tied to `rs1`, so each is two register reads and one
@@ -246,7 +253,7 @@ produced them. Each spec entry's `title` names its page in the manual.
 
 # Reference (generated)
 
-Spec version **0.1-draft**. 749 concrete instruction variants.
+Spec version **0.1-draft**. 757 concrete instruction variants.
 
 ## Parameters
 
@@ -304,6 +311,7 @@ FP registers are a namespace of their own, 64 bits each, named only by the regis
 | MCS | `op[31:26]` `rd[25:20]` `rs1[19:14]` `sp[13:12]` `sz[11:10]` `ul[9:9]` `imm[8:0]` | signed |
 | MW | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `imm[5:0]` | signed |
 | MC | `op[31:26]` `rd[25:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `sz[5:4]` `imm[3:0]` | signed |
+| MV | `op[31:26]` `dir[25:25]` `rsv[24:20]` `rs1[19:14]` `rs2[13:8]` `sp[7:6]` `sz[5:4]` `imm[3:0]` | signed |
 | S | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:8]` `imm[7:0]` | unsigned |
 | BFI | `op[31:26]` `rd[25:20]` `rs1[19:14]` `fn[13:12]` `f[11:11]` `off[10:6]` `wid[5:1]` `rsv[0:0]` |  |
 | CG | `op[31:26]` `cond[25:22]` `imm[21:0]` | signed |
@@ -824,6 +832,8 @@ Syntax: `ld.32.gd rd, disp(rs1)`; stores take the data register in the rd positi
 | `cas.8` | CAS | cas | 1 | Compare-and-swap byte: if [rs1 + imm] == rs2[7:0], store rd[7:0]; rd = the old byte. Atomic (as SPARC CASA); 68k CAS on the PLA path. |
 | `cas.16` | CAS | cas | 2 |  |
 | `cas.32` | CAS | cas | 4 |  |
+| `mov16` | CAS | mov16 | 16 | Line move: copy the 16-byte line at (rs1 + imm) & ~15 to the line at rs2 & ~15. One non-speculative access, as cas; 68k MOVE16 on the PLA path. |
+| `mov16r` | CAS | mov16 | 16 | Line move: copy the 16-byte line at rs2 & ~15 to the line at (rs1 + imm) & ~15. |
 | `probe.r` | PROBER | probe, forms .us/.ua write u | 0 | Translate rs1 + imm for a read without accessing memory, using the hardware table walker (transparent translation registers, then the tables; loads the ATC). rd = the 68040 MMUSR value for the translation: physical page in 31:12, then B(11) G(10) U1 U0 S(7) CM(6:5) M(4) W(2) T(1) R(0). With translation disabled (TC.E = 0) and no TTR matching, rd = 0 (the access is untranslated). The access would succeed (ok, spec probe_ok) if translation is disabled and no TTR matched (rd = 0), or if T or R is set and B is clear (and, for probe.w, W is clear; for a user-mode access, S is clear). Never faults. PTESTR/PTESTW are probe.r.ga/probe.w.ga. probe.r.us also sets the millicode predicate u to that success (ok); probe.r.ua sets u = u && ok, so a chain of probes leaves u set only if every probed access would succeed. |
 | `probe.w` | PROBEW | probe, forms .us/.ua write u | 0 | As probe.r, translating for a write (ok also needs W clear); probe.w.us / probe.w.ua write u as probe.r.us / probe.r.ua. |
 | `ld.c.8u` | LDC | load, reads u | 1 | Conditional load: if u is set, exactly ld.8u; if u is clear, rd = 0 and no access is made (no translation, no fault). |

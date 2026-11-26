@@ -427,5 +427,20 @@ cas:
   W: ["cmp.16 {V}, {Dc}", "mov.16.nf {Dc}, {V}"]
   L: ["cmp.32 {V}, {Dc}", "add {Dc}, {V}, x0"]
 
+# MOVE16 (68040): one mov16 / mov16r uop, first in its flow (the flow's
+# non-speculative point), copies the source line to the destination line (the
+# low 4 address bits of both are ignored); the postincrements follow it, so an
+# access fault restarts the instruction with the registers untouched. The absolute forms (f600-f61f, Ay in bits 2:0, the address at
+# offset 2) are plain flows: {Ay}, {abs}. (Ax)+,(Ay)+ (f620-f627) is a
+# second-level decode on its extension word: Ay is bits 14:12 with bit 15 set
+# (the front end substitutes {Ay}; a clear bit 15 stays with millicode, line
+# F). With Ay = Ax the line is copied over itself and the register is
+# incremented once (68040 UM section 1, note 7: as MOVE16 (Ax),(Ay)+).
+move16:
+  abs_src: ["mov16.gd {Ay}, {abs}(x0)"]      # (xxx).L,(Ay)[+]
+  abs_dst: ["mov16r.gd {Ay}, {abs}(x0)"]     # (Ay)[+],(xxx).L
+  postinc: ["mov16.gd {Ay}, 0({Ax})"]
+  bump: "addi {R}, {R}, 16"
+
 params:
   movem_regs: 5   # assumed registers per MOVEM for the uop estimate

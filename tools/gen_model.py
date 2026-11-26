@@ -11,10 +11,10 @@ extension words (IK_* below); bit 7 negates it, bit 6 adds the bitfield byte
 offset (bits 10:9 of the extension word at offset 2), and `imm` is added to
 any run-time value. Register number 60 (G_XREG) is the register named by the
 extension word at offset 2, which the front end substitutes: bits 14:12 (Dn)
-for a bitfield, MULx.L Dl or DIVx.L Dq, bits 15:12 (Dn/An) for MOVEC and MOVES, bits 8:6
+for a bitfield, MULx.L Dl or DIVx.L Dq, bits 15:12 (Dn/An) for MOVEC and MOVES (and MOVE16 Ay), bits 8:6
 for CAS Du; register 61 (G_XREG2) is bits 2:0 of it (MULx.L Dh, DIVx.L Dr, CAS Dc).
 
-Second-level decode (XSEL): bitfield, MOVEC, MOVE to/from SR, MULx.L, DIVx.L, MOVES and CAS opwords have up to XSEL_NV
+Second-level decode (XSEL): bitfield, MOVEC, MOVE to/from SR, MULx.L, DIVx.L, MOVES, CAS and MOVE16 (Ax)+,(Ay)+ opwords have up to XSEL_NV
 flows each, XSEL_START/LEN[XSEL_INDEX[op]*XSEL_NV + v], chosen from the
 extension word and the S and M bits (flows.yaml `bitfield:`, `movec:`, `sr:`, `mull:`, `divl:`, `moves:`, `cas:`);
 length 0 marks a variant
@@ -127,7 +127,7 @@ def main():
         vs = g.ex.xsel_variants(op)
         if not vs:
             continue
-        nx["movec" if op in (0x4E7A, 0x4E7B) else "bitfield" if op & 0xF8C0 == 0xE8C0 else "mull" if op & 0xFFC0 == 0x4C00 else "divl" if op & 0xFFC0 == 0x4C40 else "cas" if op & 0xF9C0 == 0x08C0 else "moves" if op & 0xFF00 == 0x0E00 else "sr"] += 1
+        nx["movec" if op in (0x4E7A, 0x4E7B) else "bitfield" if op & 0xF8C0 == 0xE8C0 else "mull" if op & 0xFFC0 == 0x4C00 else "divl" if op & 0xFFC0 == 0x4C40 else "cas" if op & 0xF9C0 == 0x08C0 else "move16" if op & 0xFFF8 == 0xF620 else "moves" if op & 0xFF00 == 0x0E00 else "sr"] += 1
         xsel_index[op] = len(xsel_start) // XSEL_NV
         for v in range(XSEL_NV):
             us = g.lower(vs[v]) if v < len(vs) and vs[v] else []

@@ -201,7 +201,8 @@ class Spec:
         for op in ops:
             wb = op.get("writeback")
             cas = op["kind"] == "cas"
-            fmt = self.formats[op.get("fmt") or ("MC" if cas else "MW" if wb else "M")]
+            mov16 = op["kind"] == "mov16"
+            fmt = self.formats[op.get("fmt") or ("MC" if cas else "MV" if mov16 else "MW" if wb else "M")]
             reads_flags = self._flag_resources(op.get("reads_flags", []))
             writes_flags = self._flag_resources(op.get("writes_flags", []))
             if op.get("u_forms"):
@@ -217,7 +218,9 @@ class Spec:
                 uforms = [(None, "", None)]
             for (um, usuf, umode), sp in [(f, s) for f in uforms for s in self.spaces]:
                 fixed = {"op": self.majors[op["major"]], "sp": sp["code"]}
-                for k in ("sz", "lk", "ul"):
+                if "rsv" in fmt.fields:
+                    fixed["rsv"] = 0
+                for k in ("sz", "lk", "ul", "dir"):
                     if k in op:
                         if k not in fmt.fields:
                             raise SpecError("mem op %s: field %s not in format %s" % (op["name"], k, fmt.name))
@@ -231,12 +234,14 @@ class Spec:
                     operands = ["rs2", "mem"]    # data in rs2; rd = rs1 gets the new address
                 elif cas:
                     operands = ["rd", "rs2", "mem"]   # rd: value to store in, old operand out; rs2: compare
+                elif mov16:
+                    operands = ["rs2", "mem"]   # rs2: the destination line; mem: the source line
                 else:
                     operands = ["rd", "mem"]     # loads: rd is the result; stores: rd carries the data
                 attrs = dict(kind=op["kind"], unit="mem", bytes=op["bytes"],
                              signed=op.get("signed", False), locked=op.get("locked"),
                              space=sp["name"], desc=op.get("desc", ""), sem=None, writeback=wb,
-                             cti=None, serialize=op.get("locked") is not None or cas, tied=bool(wb),
+                             cti=None, serialize=op.get("locked") is not None or cas or mov16, tied=bool(wb),
                              reads_rd=cas,
                              imm_signed=True, imm_max=None, reads_flags=rf, writes_flags=wf,
                              conditional="u" in rf and op["kind"] in ("load", "store"), umode=umode,

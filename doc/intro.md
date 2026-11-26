@@ -107,6 +107,13 @@ CAS2 use locked sequences: `ldl.*` begins one, `stu.*` or `unlock` ends it.
 All of these execute non-speculatively at the head of the ROB. The machine is
 single-core, so locking only has to exclude DMA.
 
+MOVE16 has `mov16` and `mov16r`: one access that reads a whole 16-byte line
+and writes it over another (the low 4 address bits are ignored), with the
+displacement on the source (`mov16`) or the destination (`mov16r`), so every
+MOVE16 form is one of them first in its flow, followed by its
+postincrements. Like `cas` it executes non-speculatively at the head of the
+ROB; a fault on either side writes nothing.
+
 Stores can write back their base register: `st.<w>.pre` stores to `rs1 + imm`
 and sets `rd` to that address, `st.<w>.post` stores to `rs1` and sets `rd` to
 `rs1 + imm`. `rd` is tied to `rs1`, so each is two register reads and one

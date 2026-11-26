@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 #include "uisa.h"
 
@@ -247,6 +248,22 @@ void Machine::step(const uisa_fuop &u) {
     // ld.c / st.c / stu.c with u clear: no access at all (no translation, no
     // fault, nothing logged); a load writes rd = 0, a store writes nothing
     if (o.is_load) R[u.rd] = 0;
+  } else if (o.is_load && o.is_store && o.mem_bytes == 16) {   // mov16: the 68040's MOVE16
+    // the source line (rs1 + imm) read whole, then the destination line (rs2)
+    // written whole; the low 4 bits of both addresses are ignored.  A fault
+    // on the source writes nothing.
+    // (mov16r: the other way, rs2's line to rs1 + imm's)
+    int fcr = fc_space(space, false), fcw = fc_space(space, true);
+    uint32_t src = (a + immv) & ~15u, dst = R[u.rs2] & ~15u, buf[4];
+    if (o.mnem[5] == 'r') std::swap(src, dst);
+    for (int i = 0; i < 4; i++) {
+      buf[i] = load(fcr, src + 4 * i, 4);
+      if (fail != R_MATCH) return;
+    }
+    for (int i = 0; i < 4; i++) {
+      store(fcw, dst + 4 * i, 4, buf[i]);
+      if (fail != R_MATCH) return;
+    }
   } else if (o.is_load && o.is_store) {         // cas: compare-and-swap (as SPARC CASA)
     int fc = fc_space(space, true);
     uint32_t addr = a + immv, n = o.mem_bytes;
@@ -636,6 +653,13 @@ Flow select_flow(uint16_t cur_op, uint16_t sr, uint32_t pc, Mem &mem) {
       f.xreg = G_D + ((e >> 12) & 7);
       f.xreg2 = G_D + (e & 7);
     }
+  }
+  // MOVE16 (Ax)+,(Ay)+: Ay is extension bits 14:12, with bit 15 set (else
+  // millicode: line F); variant 1 when Ay = Ax (one increment)
+  if ((cur_op & 0xfff8) == 0xf620 && mem.ifetch(pc + 2, 2, e) && (e & 0x8000)) {
+    pick(XSEL_INDEX[cur_op] * XSEL_NV + (((e >> 12) & 7) == (cur_op & 7u) ? 1 : 0));
+    f.xreg = G_A + ((e >> 12) & 7);
+    return f;
   }
   // CAS Dc,Du,<ea>: one flow; Du is extension bits 8:6, Dc bits 2:0
   if ((cur_op & 0xf9c0) == 0x08c0 && mem.ifetch(pc + 2, 2, e)) {

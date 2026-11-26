@@ -43,7 +43,7 @@ def facts(spec, v):
         writes_nzvc=int("nzvc" in v.writes_flags), writes_x=int("x" in v.writes_flags),
         reads_u=int("u" in v.reads_flags), writes_u=int("u" in v.writes_flags),
         serialize=int(bool(v.serialize)), tied=int(bool(v.tied)),
-        is_load=int(v.kind in ("load", "cas")), is_store=int(v.kind in ("store", "cas") or bool(v.attrs.get("store_bytes"))), is_probe=int(v.kind == "probe"),
+        is_load=int(v.kind in ("load", "cas", "mov16")), is_store=int(v.kind in ("store", "cas", "mov16") or bool(v.attrs.get("store_bytes"))), is_probe=int(v.kind == "probe"),
         lock_begin=int(v.attrs.get("locked") == "begin"), lock_end=int(v.attrs.get("locked") == "end"),
         load_signed=int(bool(v.attrs.get("signed"))), mem_bytes=v.attrs.get("bytes") or v.attrs.get("store_bytes") or 0,
         unit=UNITS.index(v.unit), cti=CTIS.index(v.cti),
@@ -120,7 +120,7 @@ def sv_attrs(spec):
             if fa[k]:
                 body.append("d.%s = 1'b1;" % k)
         if fa["mem_bytes"]:
-            body.append("d.mem_bytes = 3'd%d;" % fa["mem_bytes"])
+            body.append("d.mem_bytes = 5'd%d;" % fa["mem_bytes"])
         body.append("d.unit = 3'd%d;" % fa["unit"])
         if fa["cti"]:
             body.append("d.cti = 4'd%d;" % fa["cti"])
@@ -161,7 +161,7 @@ def gen_sv(spec):
     logic        reads_u, writes_u;   // millicode predicate u (probe .us/.ua, ld.c/st.c/stu.c, b.u/b.nu)
     logic        serialize, tied, tie_violation;
     logic        is_load, is_store, is_probe, lock_begin, lock_end, load_signed;
-    logic [2:0]  mem_bytes;
+    logic [4:0]  mem_bytes;   // 1, 2, 4; 16 for mov16
     logic [1:0]  space;
     logic [3:0]  cond;
     logic [2:0]  unit;
@@ -198,7 +198,7 @@ def gen_sv(spec):
             if fa[k]:
                 body.append("d.%s = 1'b1;" % k)
         if fa["mem_bytes"]:
-            body.append("d.mem_bytes = 3'd%d;" % fa["mem_bytes"])
+            body.append("d.mem_bytes = 5'd%d;" % fa["mem_bytes"])
         body.append("d.unit = 3'd%d;" % fa["unit"])
         if fa["cti"]:
             body.append("d.cti = 4'd%d;" % fa["cti"])

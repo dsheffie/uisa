@@ -134,6 +134,8 @@ formats:
   MW:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[sp,7,6],[imm,5,0]], imm: {signed: true, scale: 1}}
   # compare-and-swap: rd is both the value stored and the result, rs2 the compare value
   MC:  {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[rs2,13,8],[sp,7,6],[sz,5,4],[imm,3,0]], imm: {signed: true, scale: 1}}
+  # line moves (the CAS major's sz 3): dir 0 copies the line at rs1 + imm to rs2's, dir 1 rs2's to rs1 + imm's
+  MV:  {fields: [[op,31,26],[dir,25,25],[rsv,24,20],[rs1,19,14],[rs2,13,8],[sp,7,6],[sz,5,4],[imm,3,0]], imm: {signed: true, scale: 1}}
   S:   {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,8],[imm,7,0]], imm: {signed: false, scale: 1}}
   BFI: {fields: [[op,31,26],[rd,25,20],[rs1,19,14],[fn,13,12],[f,11,11],["off",10,6],[wid,5,1],[rsv,0,0]]}
   # guest control flow: displacements are bytes, relative to the guest instruction's address
@@ -386,6 +388,17 @@ mem_ops:
   - {name: cas.8, title: "Compare and Swap 8-bit",  major: CAS, sz: 0, kind: cas, bytes: 1, desc: "Compare-and-swap byte: if [rs1 + imm] == rs2[7:0], store rd[7:0]; rd = the old byte. Atomic (as SPARC CASA); 68k CAS on the PLA path."}
   - {name: cas.16, title: "Compare and Swap 16-bit", major: CAS, sz: 1, kind: cas, bytes: 2}
   - {name: cas.32, title: "Compare and Swap 32-bit", major: CAS, sz: 2, kind: cas, bytes: 4}
+  # Line moves (68040 MOVE16): mov16 copies the 16-byte line holding rs1 +
+  # imm to the line holding rs2, mov16r the line holding rs2 to the line
+  # holding rs1 + imm (the low 4 bits of both addresses are ignored), so each
+  # MOVE16 form is one of them with no temporary. The CAS major's sz 3 (format
+  # MV, dir 0 / 1). One access: it reads the whole source line, then writes
+  # the whole destination line, and either side may fault (the destination
+  # is not written if the source faults). Executes non-speculatively, like
+  # cas. Function code: as a load for the source, as a store for the
+  # destination (SFC / DFC for .ga).
+  - {name: mov16, title: "Move 16-Byte Line", major: CAS, sz: 3, dir: 0, kind: mov16, bytes: 16, desc: "Line move: copy the 16-byte line at (rs1 + imm) & ~15 to the line at rs2 & ~15. One non-speculative access, as cas; 68k MOVE16 on the PLA path."}
+  - {name: mov16r, title: "Move 16-Byte Line, Reversed", major: CAS, sz: 3, dir: 1, kind: mov16, bytes: 16, desc: "Line move: copy the 16-byte line at rs2 & ~15 to the line at (rs1 + imm) & ~15."}
   # Probes (format MP). The um field gives each three forms: probe.r (um 0:
   # rd only), probe.r.us (um 1: also u = ok) and probe.r.ua (um 2: also
   # u = u && ok), where ok is `probe_ok` above; um 3 is reserved (illegal).

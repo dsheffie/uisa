@@ -64,7 +64,7 @@ module tb_decode;
       e = uisa_decode({6'd16, 6'd1, 6'd2, 3'd0, 11'd2});                // b.eq
       if (p.op != UISA_PROBE_R_US_GD || !p.writes_u || p.reads_u || !p.is_probe) fails++;
       if (a.op != UISA_PROBE_W_UA_GD || !a.writes_u || !a.reads_u) fails++;
-      if (l.op != UISA_LD_C_32_GD || !l.reads_u || !l.is_load || l.mem_bytes != 3'd4) fails++;
+      if (l.op != UISA_LD_C_32_GD || !l.reads_u || !l.is_load || l.mem_bytes != 5'd4) fails++;
       if (s.op != UISA_STU_C_32_GD || !s.reads_u || !s.is_store || !s.lock_end || !s.reads_rd) fails++;
       if (b.op != UISA_B_NU || !b.reads_u || b.reads_rs1 || b.imm != 32'd8) fails++;
       if (e.op != UISA_B_EQ || e.reads_u) fails++;

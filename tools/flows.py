@@ -197,6 +197,8 @@ class Expander:
     def _expand(self, op):
         ins = m68kdec.decode(op)
         key = self.op_key(op, ins)
+        if op & 0xFFE0 == 0xF600:
+            return self.move16_abs(op)
         if key in self.millicode or key.split(".")[0] in self.millicode:
             return Flow("millicode", note=key)
         spec = self.f["ops"].get(key)
@@ -482,6 +484,26 @@ class Expander:
         cas = "cas.%d.gd %s, {dh@2}, %s(%s)" % (w, t["t0"], disp, base)
         return [Flow("pla", self.peephole(swap + pre + [cas] + post + body))]
 
+    def move16_abs(self, op):
+        """MOVE16 with an absolute address (f600-f61f): k = bits 4:3 is 0
+        (Ay)+,(xxx).L, 1 (xxx).L,(Ay)+, 2 (Ay),(xxx).L, 3 (xxx).L,(Ay)."""
+        m = self.f["move16"]
+        ay, k = "a%d" % (op & 7), (op >> 3) & 3
+        b = {"{Ay}": ay, "{abs}": "{abs.L@2}", "{R}": ay}
+        body = m["abs_src" if k & 1 else "abs_dst"] + ([m["bump"]] if k < 2 else [])
+        return Flow("pla", [self.subst(x, b) for x in body])
+
+    def move16_variants(self, op):
+        """MOVE16 (Ax)+,(Ay)+ (f620-f627): [Ay != Ax, Ay = Ax]."""
+        if op & 0xFFF8 != 0xF620:
+            return None
+        m = self.f["move16"]
+        ax = "a%d" % (op & 7)
+        b = {"{Ax}": ax, "{Ay}": "{rn@2}"}
+        cp = [self.subst(x, b) for x in m["postinc"]]
+        return [Flow("pla", cp + [self.subst(m["bump"], {"{R}": ax}), self.subst(m["bump"], {"{R}": "{rn@2}"})]),
+                Flow("pla", cp + [self.subst(m["bump"], {"{R}": ax})])]
+
     def xsel_variants(self, op):
         """Second-level-decode flows of an opword as a list indexed by variant
         (None where millicode runs), or None if the opword has none."""
@@ -492,7 +514,7 @@ class Expander:
         if mv:
             return [mv[k] for k in range(16)]
         return (self.sr_variants(op) or self.mull_variants(op) or self.divl_variants(op) or self.moves_variants(op)
-                or self.cas_variants(op))
+                or self.cas_variants(op) or self.move16_variants(op))
 
     @staticmethod
     def subst(line, b):
@@ -560,6 +582,8 @@ def labeled_variants(ex, op):
         out.append(("S = 1, %s" % ("<ea>,Dn", "<ea>,An", "Rn,<ea>")[n], v, False))
     for v in ex.cas_variants(op) or []:
         out.append(("memory-alterable <ea>", v, False))
+    for n, v in enumerate(ex.move16_variants(op) or []):
+        out.append((("Ay != Ax", "Ay = Ax")[n], v, False))
     for n, v in enumerate(ex.divl_variants(op) or []):
         if v:
             out.append(("%s 32-bit dividend%s" % ("signed" if n & 2 else "unsigned", ", quotient only" if n & 4 else ""), v, False))
