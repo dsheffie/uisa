@@ -192,12 +192,16 @@ ops:
     any: ["zext16 x28, {D}", "addi {T}, {D}, -1", "sel.{cc} {T}, {D}, {T}", "mrg16 {D}, {D}, {T}",
           "sel.{cc} x28, x0, x28", "gbnz x28, {disp_br}"]
   RTS: {any: ["ld.32.gd {T}, 0(a7)", "addi a7, a7, 4", "gjr {T}, 0"]}
+  # JSR (A7) / d16(A7): the target is the address before the push, so it is
+  # computed into {T} first (tools/flows.py picks a7base when {base} is a7)
   JSR:
     src: addr
     any: ["gpushr a7, {len}", "gjr {base}, {disp}"]
+    a7base: ["addi {T}, a7, {disp}", "gpushr a7, {len}", "gjr {T}, 0"]
   JMP: {src: addr, any: ["gjr {base}, {disp}"]}
   LINK: {any: ["st.32.pre.gd {A}, -4(a7)", "add {A}, a7, x0", "addi a7, a7, {imm}"]}
-  UNLK: {any: ["add a7, {A}, x0", "ld.32.gd {A}, 0(a7)", "addi a7, a7, 4"]}
+  # SP <- An + 4, then An <- (old An): for UNLK A7 the load is the last write
+  UNLK: {any: ["add a7, {A}, x0", "addi a7, a7, 4", "ld.32.gd {A}, -4(a7)"]}
   NOP: {any: ["addi x0, x0, 0"]}
   # Encodings that raise an exception at decode are one fault uop, raised as
   # the instruction (format 0, the stacked PC the instruction's). ILLEGAL is

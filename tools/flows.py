@@ -303,6 +303,9 @@ class Expander:
                 cands.append(pfx + dkind + "32")
             cands.append(pfx + dkind)
             cands.append(pfx + "any")
+        if b.get("{base}") == "a7" and "a7base" in tmpl:
+            # the address is A7 itself, which the template moves before using it
+            cands.insert(0, "a7base")
         body = next((tmpl[c] for c in cands if c in tmpl), None)
         if body is None:
             return Flow("unmapped", note="%s: no template for %s" % (key, "/".join(cands)))
